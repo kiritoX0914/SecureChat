@@ -1,0 +1,15 @@
+name: Runner probe
+on:
+  push:
+    branches: [ ci-runner-probe ]
+  workflow_dispatch:
+jobs:
+  probe:
+    name: Ubuntu probe
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prove a runner was acquired
+        run: |
+          echo "runner ok"
+          uname -a
+          date -u
