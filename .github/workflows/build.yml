@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build & Package iOS App
-    runs-on: macos-15 # GitHub 官方 macOS 虚拟机 (Apple Silicon; macos-14 retired 2026-11-02)
+    runs-on: macos-15-intel # macos-14 retired; macos-15 arm64 pool timed out after 15m with no runner
 
     steps:
       - name: Checkout repository
