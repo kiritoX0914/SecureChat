@@ -2,15 +2,15 @@ name: Build SecureChat iOS
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ build-macos-15-intel ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ build-macos-15-intel ]
   workflow_dispatch: # 允许在 GitHub 网页上手动点击运行
 
 jobs:
   build:
     name: Build & Package iOS App
-    runs-on: macos-latest # macos-15 public arm64 not acquired after 5m; try current default (macos-26)
+    runs-on: macos-15-intel # parallel attempt: intel pool, while macos-latest stays queued on main
 
     steps:
       - name: Checkout repository
