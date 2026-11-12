@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build & Package iOS App
-    runs-on: macos-latest # macos-15 public arm64 not acquired after 5m; try current default (macos-26)
+    runs-on: macos-15-intel # arm64 macos-15/macos-latest stayed queued; intel pool acquired a runner
 
     steps:
       - name: Checkout repository
