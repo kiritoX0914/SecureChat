@@ -4,6 +4,7 @@
 
 import Foundation
 import Network
+import Darwin
 
 /// Handles advertising our presence and discovering peers on the local network
 /// via Bonjour (mDNS/DNS-SD) using `NWListener` and `NWBrowser`.
@@ -12,7 +13,31 @@ final class LANDiscovery {
     // MARK: - Constants
 
     /// The Bonjour service type used for peer discovery.
-    private static let serviceType = "_securechat._tcp"
+    static let serviceType = "_securechat._tcp"
+
+    /// Preferred TCP port for the listener so peers can connect by IP without
+    /// needing Bonjour. Falls back to a system-assigned port if this is busy.
+    static let defaultTCPPort: UInt16 = 47823
+
+    // mDNS / DNS-SD error codes from dns_sd.h
+    private static let dnsPolicyDenied: Int32 = -65570 // kDNSServiceErr_PolicyDenied
+    private static let dnsNoAuth: Int32 = -65555       // kDNSServiceErr_NoAuth
+
+    // MARK: - Status
+
+    enum Phase: Equatable {
+        case stopped
+        case starting
+        case ready
+        case waiting(String)
+        case failed(String)
+        case permissionDenied
+    }
+
+    struct LocalAddress: Equatable {
+        let interface: String
+        let address: String
+    }
 
     // MARK: - Callbacks
 
@@ -25,13 +50,17 @@ final class LANDiscovery {
     /// Called when the listener accepts an incoming TCP connection.
     var onIncomingConnection: ((NWConnection) -> Void)?
 
+    /// Called on the discovery queue whenever listener or browser status changes.
+    var onStatusChange: (() -> Void)?
+
     // MARK: - Public Read-Only State
 
     /// The TCP port our listener is bound to, available once the listener is `.ready`.
-    var listeningPort: UInt16? {
-        guard let port = listener?.port else { return nil }
-        return port.rawValue
-    }
+    private(set) var listeningPort: UInt16?
+
+    private(set) var listenerPhase: Phase = .stopped
+    private(set) var browserPhase: Phase = .stopped
+    private(set) var isLocalNetworkDenied = false
 
     // MARK: - Private State
 
@@ -51,27 +80,56 @@ final class LANDiscovery {
     private var discoveredPeers: [NWBrowser.Result: String] = [:]
     private let lock = NSLock()
 
+    /// `true` while we are still trying to bind the preferred fixed port.
+    private var preferFixedPort = true
+
+    // MARK: - TCP Parameters
+
+    /// Shared TCP parameters used by the listener, browser, and connections.
+    /// `includePeerToPeer` lets Network.framework also try AWDL / peer-to-peer
+    /// interfaces, which can help when devices aren't on the same L2 broadcast
+    /// domain (for example some Internet Sharing setups).
+    static func makeTCPParameters() -> NWParameters {
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        return parameters
+    }
+
     // MARK: - Advertising
 
-    /// Begin advertising our service on the LAN. The listener picks a random
-    /// available TCP port and publishes a Bonjour TXT record containing our
-    /// `deviceId` and `displayName`.
+    /// Begin advertising our service on the LAN. Tries the default TCP port
+    /// first and falls back to a random available port if it is already taken.
     ///
     /// - Parameters:
     ///   - deviceId: Our unique device UUID.
     ///   - displayName: The user's chosen display name.
     func startAdvertising(deviceId: String, displayName: String) {
+        startAdvertising(deviceId: deviceId, displayName: displayName, preferFixedPort: true)
+    }
+
+    private func startAdvertising(deviceId: String, displayName: String, preferFixedPort: Bool) {
         // Tear down any existing listener first.
         stopAdvertising()
 
         advertisedDeviceId = deviceId
         advertisedDisplayName = displayName
+        self.preferFixedPort = preferFixedPort
 
+        let parameters = Self.makeTCPParameters()
         do {
-            let parameters = NWParameters.tcp
-            listener = try NWListener(using: parameters)
+            if preferFixedPort, let port = NWEndpoint.Port(rawValue: Self.defaultTCPPort) {
+                listener = try NWListener(using: parameters, on: port)
+            } else {
+                listener = try NWListener(using: parameters)
+            }
         } catch {
+            print("[LANDiscovery] Failed to create NWListener on preferred port: \(error). Falling back.")
+            if preferFixedPort {
+                startAdvertising(deviceId: deviceId, displayName: displayName, preferFixedPort: false)
+                return
+            }
             print("[LANDiscovery] Failed to create NWListener: \(error)")
+            setListenerPhase(.failed(error.localizedDescription))
             return
         }
 
@@ -82,23 +140,57 @@ final class LANDiscovery {
             txtRecord: txtRecord
         )
 
+        setListenerPhase(.starting)
+
         listener?.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
             case .ready:
-                if let port = self?.listener?.port {
+                let port = self.listener?.port?.rawValue
+                self.listeningPort = port
+                if let port {
                     print("[LANDiscovery] Listener ready on port \(port)")
                 }
+                self.setListenerPhase(.ready)
+
+            case .waiting(let error):
+                print("[LANDiscovery] Listener waiting: \(error)")
+                if Self.isLocalNetworkDenied(error) {
+                    self.flagPermissionDenied()
+                    self.setListenerPhase(.permissionDenied)
+                } else {
+                    self.setListenerPhase(.waiting(error.localizedDescription))
+                }
+
             case .failed(let error):
                 print("[LANDiscovery] Listener failed: \(error). Restarting…")
-                self?.listener?.cancel()
+                self.listener?.cancel()
+                if preferFixedPort && Self.isAddressInUse(error) {
+                    self.queue.async { [weak self] in
+                        guard let self, let id = self.advertisedDeviceId,
+                              let name = self.advertisedDisplayName else { return }
+                        self.startAdvertising(deviceId: id, displayName: name, preferFixedPort: false)
+                    }
+                    return
+                }
+                if Self.isLocalNetworkDenied(error) {
+                    self.flagPermissionDenied()
+                    self.setListenerPhase(.permissionDenied)
+                    return
+                }
+                self.setListenerPhase(.failed(error.localizedDescription))
                 // Attempt to restart after a brief delay.
-                self?.queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self.queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     guard let self, let id = self.advertisedDeviceId,
                           let name = self.advertisedDisplayName else { return }
-                    self.startAdvertising(deviceId: id, displayName: name)
+                    self.startAdvertising(deviceId: id, displayName: name, preferFixedPort: self.preferFixedPort)
                 }
+
             case .cancelled:
                 print("[LANDiscovery] Listener cancelled")
+                self.listeningPort = nil
+                self.setListenerPhase(.stopped)
+
             default:
                 break
             }
@@ -137,16 +229,35 @@ final class LANDiscovery {
         self.ownDeviceId = ownDeviceId
 
         let descriptor = NWBrowser.Descriptor.bonjour(type: Self.serviceType, domain: nil)
-        browser = NWBrowser(for: descriptor, using: .tcp)
+        browser = NWBrowser(for: descriptor, using: Self.makeTCPParameters())
 
-        browser?.stateUpdateHandler = { state in
+        setBrowserPhase(.starting)
+
+        browser?.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
             case .ready:
                 print("[LANDiscovery] Browser ready")
+                self.setBrowserPhase(.ready)
+            case .waiting(let error):
+                print("[LANDiscovery] Browser waiting: \(error)")
+                if Self.isLocalNetworkDenied(error) {
+                    self.flagPermissionDenied()
+                    self.setBrowserPhase(.permissionDenied)
+                } else {
+                    self.setBrowserPhase(.waiting(error.localizedDescription))
+                }
             case .failed(let error):
                 print("[LANDiscovery] Browser failed: \(error)")
+                if Self.isLocalNetworkDenied(error) {
+                    self.flagPermissionDenied()
+                    self.setBrowserPhase(.permissionDenied)
+                } else {
+                    self.setBrowserPhase(.failed(error.localizedDescription))
+                }
             case .cancelled:
                 print("[LANDiscovery] Browser cancelled")
+                self.setBrowserPhase(.stopped)
             default:
                 break
             }
@@ -165,6 +276,87 @@ final class LANDiscovery {
     func stopAll() {
         stopAdvertising()
         stopBrowsing()
+        isLocalNetworkDenied = false
+        listeningPort = nil
+        setListenerPhase(.stopped)
+        setBrowserPhase(.stopped)
+    }
+
+    // MARK: - Local IPv4 Addresses
+
+    /// Enumerate currently-up IPv4 addresses, skipping loopback.
+    /// Includes interfaces such as en0, bridge100 (Internet Sharing), ap1, etc.
+    static func currentIPv4Addresses() -> [LocalAddress] {
+        var addresses: [LocalAddress] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let iface = ptr {
+            defer { ptr = iface.pointee.ifa_next }
+
+            let flags = Int32(iface.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
+            guard let addr = iface.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                addr,
+                socklen_t(addr.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+
+            let name = String(cString: iface.pointee.ifa_name)
+            let address = String(cString: host)
+            guard address != "0.0.0.0", !address.hasPrefix("127.") else { continue }
+            addresses.append(LocalAddress(interface: name, address: address))
+        }
+
+        // Prefer common LAN interfaces first so the most useful IP is at the top.
+        let rank: [String: Int] = [
+            "en0": 0, "en1": 1, "en2": 2,
+            "bridge100": 3, "bridge101": 4,
+            "ap1": 5, "awdl0": 6
+        ]
+        addresses.sort { a, b in
+            let ra = rank[a.interface] ?? 50
+            let rb = rank[b.interface] ?? 50
+            if ra != rb { return ra < rb }
+            return a.interface < b.interface
+        }
+        return addresses
+    }
+
+    // MARK: - Error Classification
+
+    static func isLocalNetworkDenied(_ error: NWError) -> Bool {
+        switch error {
+        case .dns(let code):
+            return code == dnsPolicyDenied || code == dnsNoAuth
+        case .posix(let code):
+            return code == .EPERM || code == .EACCES
+        default:
+            break
+        }
+        let text = String(describing: error)
+        return text.contains("PolicyDenied")
+            || text.contains("-65570")
+            || text.contains("NoAuth")
+            || text.contains("-65555")
+    }
+
+    static func isAddressInUse(_ error: NWError) -> Bool {
+        if case .posix(let code) = error, code == .EADDRINUSE {
+            return true
+        }
+        let text = String(describing: error)
+        return text.contains("Address already in use") || text.contains("EADDRINUSE")
     }
 
     // MARK: - Private Helpers
@@ -172,6 +364,7 @@ final class LANDiscovery {
     private func stopAdvertising() {
         listener?.cancel()
         listener = nil
+        listeningPort = nil
     }
 
     private func stopBrowsing() {
@@ -180,6 +373,20 @@ final class LANDiscovery {
         lock.lock()
         discoveredPeers.removeAll()
         lock.unlock()
+    }
+
+    private func flagPermissionDenied() {
+        isLocalNetworkDenied = true
+    }
+
+    private func setListenerPhase(_ phase: Phase) {
+        listenerPhase = phase
+        onStatusChange?()
+    }
+
+    private func setBrowserPhase(_ phase: Phase) {
+        browserPhase = phase
+        onStatusChange?()
     }
 
     /// Build an `NWTXTRecord` containing our identity fields.

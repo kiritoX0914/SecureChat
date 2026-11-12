@@ -7,6 +7,16 @@ import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject var chatManager: ChatManager
+
+    var body: some View {
+        SettingsBody(network: chatManager.networkManager)
+            .environmentObject(chatManager)
+    }
+}
+
+struct SettingsBody: View {
+    @EnvironmentObject var chatManager: ChatManager
+    @ObservedObject var network: NetworkManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var editedName: String = ""
@@ -17,6 +27,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 profileSection
+                LocalNetworkForm(network: network)
                 securitySection
                 howItWorksSection
                 aboutSection
@@ -34,6 +45,7 @@ struct SettingsView: View {
             }
             .onAppear {
                 editedName = chatManager.displayName
+                network.refreshLocalAddresses()
             }
         }
         .tint(TelegramColors.tint)
@@ -167,7 +179,7 @@ struct SettingsView: View {
             HStack {
                 Text("Version")
                 Spacer()
-                Text("1.0.0")
+                Text("1.1.0")
                     .foregroundColor(.secondary)
             }
             HStack {
@@ -229,5 +241,174 @@ struct SettingsView: View {
             return
         }
         chatManager.updateDisplayName(trimmed)
+    }
+}
+
+
+// MARK: - Local Network / Connect by IP
+
+struct LocalNetworkForm: View {
+    @EnvironmentObject var chatManager: ChatManager
+    @ObservedObject var network: NetworkManager
+
+    @State private var connectHost: String = ""
+    @State private var connectPort: String = "\(NetworkManager.defaultTCPPort)"
+    @State private var isConnecting = false
+
+    var body: some View {
+        Section {
+            HStack {
+                Text("Status")
+                Spacer()
+                if network.isLocalNetworkDenied {
+                    Text("Local network permission denied")
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.trailing)
+                } else {
+                    Text(network.discoveryStatus)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            .font(.subheadline)
+
+            if let port = network.listeningPort {
+                HStack {
+                    Text("Listening Port")
+                    Spacer()
+                    Text("\(port)")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Button {
+                        UIPasteboard.general.string = String(port)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                            .foregroundColor(TelegramColors.tint)
+                    }
+                }
+            }
+
+            if network.localIPv4Addresses.isEmpty {
+                Text("No IPv4 address found. Check that Wi-Fi or Internet Sharing is connected.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(network.localIPv4Addresses) { item in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.interface)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(addressLine(item))
+                                .font(.system(.body, design: .monospaced))
+                        }
+                        Spacer()
+                        Button {
+                            UIPasteboard.general.string = addressLine(item)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption)
+                                .foregroundColor(TelegramColors.tint)
+                        }
+                    }
+                }
+            }
+
+            Button("Refresh Addresses") {
+                network.refreshLocalAddresses()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Connect by IP")
+                    .font(.subheadline.weight(.semibold))
+                HStack {
+                    TextField("IP address", text: $connectHost)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.numbersAndPunctuation)
+                    TextField("Port", text: $connectPort)
+                        .keyboardType(.numberPad)
+                        .frame(width: 72)
+                        .multilineTextAlignment(.trailing)
+                }
+                Button {
+                    submitManualConnect()
+                } label: {
+                    HStack {
+                        if isConnecting {
+                            ProgressView()
+                        }
+                        Text("Connect")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .disabled(connectHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(.borderedProminent)
+
+                if let err = network.lastManualConnectError, !err.isEmpty {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("Local Network")
+        } footer: {
+            Text(networkFooter)
+                .font(.caption2)
+        }
+        .onAppear {
+            network.refreshLocalAddresses()
+        }
+    }
+
+    private var networkFooter: String {
+        if network.isLocalNetworkDenied {
+            return "iOS blocked local-network / Bonjour access. TrollStore installs often never appear under Settings → Privacy → Local Network. This build is fake-signed with a multicast entitlement and a Local Network TCC grant; if discovery still fails, type the other device’s IP and port (default \(NetworkManager.defaultTCPPort)) below."
+        }
+        return "Automatic discovery uses Bonjour (_securechat._tcp). If the other device cannot be found — common with TrollStore or when a Mac is sharing Ethernet to an iPhone — type its IP and port (default \(NetworkManager.defaultTCPPort)) to connect directly."
+    }
+
+    private func addressLine(_ item: NetworkManager.LocalAddress) -> String {
+        if let port = network.listeningPort {
+            return "\(item.address):\(port)"
+        }
+        return item.address
+    }
+
+    private func submitManualConnect() {
+        let host = connectHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = UInt16(connectPort.trimmingCharacters(in: .whitespacesAndNewlines)) ?? NetworkManager.defaultTCPPort
+        guard !host.isEmpty else { return }
+        isConnecting = true
+        chatManager.connectByIP(host, port: port)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            isConnecting = false
+        }
+    }
+}
+
+struct ManualConnectSheet: View {
+    @EnvironmentObject var chatManager: ChatManager
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                LocalNetworkForm(network: chatManager.networkManager)
+            }
+            .navigationTitle("Connect by IP")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .tint(TelegramColors.tint)
     }
 }

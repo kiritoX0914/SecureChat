@@ -26,6 +26,38 @@ final class NetworkManager: ObservableObject {
         let endpoint: NWEndpoint
     }
 
+    /// Local IPv4 address of one up, non-loopback interface.
+    struct LocalAddress: Identifiable, Equatable {
+        let interface: String
+        let address: String
+        var id: String { "\(interface):\(address)" }
+    }
+
+    /// Preferred listener port (same as `LANDiscovery.defaultTCPPort`).
+    static let defaultTCPPort: UInt16 = LANDiscovery.defaultTCPPort
+
+    /// Bound TCP port once the listener is ready.
+    @Published var listeningPort: UInt16?
+
+    /// Current IPv4 addresses to show for manual connect.
+    @Published var localIPv4Addresses: [LocalAddress] = []
+
+    /// `true` once the Bonjour/TCP listener is in the `.ready` state.
+    @Published var listenerReady = false
+
+    /// `true` once the Bonjour browser is in the `.ready` state.
+    @Published var browserReady = false
+
+    /// `true` if Network.framework reported a local-network permission denial
+    /// (`kDNSServiceErr_PolicyDenied` / `NoAuth`).
+    @Published var isLocalNetworkDenied = false
+
+    /// Human-readable discovery status for the UI.
+    @Published var discoveryStatus: String = "Starting…"
+
+    /// Last error from a manual IP connection attempt, if any.
+    @Published var lastManualConnectError: String?
+
     // MARK: - Constants
 
     /// Maximum incoming payload size: supports 50 MB files + Base64 expansion + envelope metadata.
@@ -66,6 +98,11 @@ final class NetworkManager: ObservableObject {
     /// known. The first received `WireEnvelope` tells us the senderId.
     private var pendingIncoming: Set<ObjectIdentifier> = []
 
+    /// Manual (Connect-by-IP) connections, mapped to a temporary id used only
+    /// so we can send the hello handshake before the peer's deviceId is known.
+    /// Temporary ids always start with `pending-`.
+    private var pendingManual: [ObjectIdentifier: String] = [:]
+
     /// Reverse lookup so we can map an `NWConnection` back to its peerId
     /// when we need to clean up on failure/cancel.
     private var connectionToPeer: [ObjectIdentifier: String] = [:]
@@ -94,8 +131,90 @@ final class NetworkManager: ObservableObject {
             self?.handleIncomingConnection(connection)
         }
 
+        discovery.onStatusChange = { [weak self] in
+            self?.publishDiscoveryStatus()
+        }
+
+        refreshLocalAddresses()
         discovery.startAdvertising(deviceId: deviceId, displayName: displayName)
         discovery.startBrowsing(ownDeviceId: deviceId)
+    }
+
+    /// Re-read this device's IPv4 addresses (call when Settings appears, or
+    /// after a network change).
+    func refreshLocalAddresses() {
+        let addresses = LANDiscovery.currentIPv4Addresses().map {
+            LocalAddress(interface: $0.interface, address: $0.address)
+        }
+        DispatchQueue.main.async {
+            self.localIPv4Addresses = addresses
+        }
+    }
+
+    /// Open a TCP connection to a host:port typed by the user. The remote
+    /// peerId is unknown until the first `WireEnvelope` arrives; we send our
+    /// hello on a temporary id as soon as the socket is ready so both sides
+    /// can complete the handshake.
+    func connectToAddress(host: String, port: UInt16) {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, port > 0 else { return }
+
+        DispatchQueue.main.async {
+            self.lastManualConnectError = nil
+        }
+
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                DispatchQueue.main.async {
+                    self.lastManualConnectError = "Invalid port"
+                }
+                return
+            }
+            let connection = NWConnection(
+                host: NWEndpoint.Host(trimmed),
+                port: nwPort,
+                using: LANDiscovery.makeTCPParameters()
+            )
+            let tempId = "pending-" + UUID().uuidString
+            let connId = ObjectIdentifier(connection)
+
+            self.stateLock.lock()
+            self.pendingManual[connId] = tempId
+            self.connections[tempId] = connection
+            self.stateLock.unlock()
+
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    print("[NetworkManager] Manual connection ready to \(trimmed):\(port)")
+                    self.receiveLoop(on: connection, peerId: nil)
+                    // Trigger ChatManager.sendHello(to: tempId) via the same path
+                    // used for discovered peers.
+                    DispatchQueue.main.async {
+                        self.onPeerConnected?(tempId)
+                    }
+                case .waiting(let error):
+                    print("[NetworkManager] Manual connection waiting: \(error)")
+                    DispatchQueue.main.async {
+                        self.lastManualConnectError = error.localizedDescription
+                    }
+                case .failed(let error):
+                    print("[NetworkManager] Manual connection failed: \(error)")
+                    DispatchQueue.main.async {
+                        self.lastManualConnectError = error.localizedDescription
+                    }
+                    self.cleanupConnection(connection)
+                case .cancelled:
+                    self.cleanupConnection(connection)
+                default:
+                    break
+                }
+            }
+
+            connection.start(queue: self.networkQueue)
+        }
     }
 
     /// Update the advertised display name on Bonjour.
@@ -115,6 +234,7 @@ final class NetworkManager: ObservableObject {
         connections.removeAll()
         connectionToPeer.removeAll()
         pendingIncoming.removeAll()
+        pendingManual.removeAll()
         stateLock.unlock()
 
         DispatchQueue.main.async {
@@ -186,7 +306,7 @@ final class NetworkManager: ObservableObject {
 
     /// Open a TCP connection to a discovered peer's endpoint.
     private func connectToPeer(peerId: String, endpoint: NWEndpoint) {
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let connection = NWConnection(to: endpoint, using: LANDiscovery.makeTCPParameters())
         let connId = ObjectIdentifier(connection)
         stateLock.lock()
         connectionToPeer[connId] = peerId
@@ -418,11 +538,17 @@ final class NetworkManager: ObservableObject {
 
         stateLock.lock()
         pendingIncoming.remove(connId)
+        let tempId = pendingManual.removeValue(forKey: connId)
+        // A manual connection already sent hello under tempId; don't send it twice.
+        let alreadySentHello = tempId != nil
+        if let tempId {
+            connections.removeValue(forKey: tempId)
+        }
 
         // Duplicate-connection resolution: when both sides connect simultaneously,
         // the peer with the lexicographically *smaller* deviceId keeps the connection
         // it *initiated* (the outgoing one). The other side keeps its incoming.
-        if let existing = connections[remotePeerId] {
+        if let existing = connections[remotePeerId], existing !== connection {
             if deviceId < remotePeerId {
                 // We have the smaller ID → keep our outgoing, drop this incoming.
                 print("[NetworkManager] Dropping duplicate incoming from \(remotePeerId) (we keep outgoing)")
@@ -445,10 +571,18 @@ final class NetworkManager: ObservableObject {
             self?.handleConnectionStateChange(state, peerId: remotePeerId, connection: connection)
         }
 
-        print("[NetworkManager] Identified incoming peer: \(remotePeerId)")
+        print("[NetworkManager] Identified peer: \(remotePeerId) (name: \(envelope.senderName))")
 
         DispatchQueue.main.async {
-            self.onPeerConnected?(remotePeerId)
+            self.availablePeers[remotePeerId] = PeerNetworkInfo(
+                displayName: envelope.senderName,
+                endpoint: connection.endpoint
+            )
+            self.onPeerFound?(remotePeerId, envelope.senderName)
+            // Incoming listener connections have not sent hello yet.
+            if !alreadySentHello {
+                self.onPeerConnected?(remotePeerId)
+            }
             self.onDataReceived?(data, remotePeerId)
         }
 
@@ -498,17 +632,68 @@ final class NetworkManager: ObservableObject {
         let connId = ObjectIdentifier(connection)
         stateLock.lock()
         pendingIncoming.remove(connId)
+        let tempId = pendingManual.removeValue(forKey: connId)
         let peerId = connectionToPeer.removeValue(forKey: connId)
         if let peerId {
             connections.removeValue(forKey: peerId)
         }
+        if let tempId {
+            connections.removeValue(forKey: tempId)
+        }
         stateLock.unlock()
 
         connection.cancel()
-        if let peerId {
+        // Don't surface temporary manual-connect ids to the UI.
+        if let peerId, !peerId.hasPrefix("pending-") {
             DispatchQueue.main.async {
                 self.onPeerDisconnected?(peerId)
             }
+        }
+    }
+
+    // MARK: - Discovery Status
+
+    /// Copy listener/browser state onto the main-thread published properties.
+    private func publishDiscoveryStatus() {
+        let port = discovery.listeningPort
+        let listenerPhase = discovery.listenerPhase
+        let browserPhase = discovery.browserPhase
+        let denied = discovery.isLocalNetworkDenied
+        let addresses = LANDiscovery.currentIPv4Addresses().map {
+            LocalAddress(interface: $0.interface, address: $0.address)
+        }
+
+        let status: String
+        if denied {
+            status = "Local network permission denied"
+        } else {
+            var parts: [String] = []
+            parts.append(Self.phrase(for: listenerPhase, role: "Listener"))
+            parts.append(Self.phrase(for: browserPhase, role: "Browser"))
+            if let port {
+                parts.append("port \(port)")
+            }
+            status = parts.joined(separator: " · ")
+        }
+
+        DispatchQueue.main.async {
+            self.listeningPort = port
+            self.localIPv4Addresses = addresses
+            self.listenerReady = (listenerPhase == .ready)
+            self.browserReady = (browserPhase == .ready)
+            self.isLocalNetworkDenied = denied
+            self.discoveryStatus = status
+        }
+    }
+
+    private static func phrase(for phase: LANDiscovery.Phase, role: String) -> String {
+        switch phase {
+        case .stopped: return "\(role) stopped"
+        case .starting: return "\(role) starting"
+        case .ready: return "\(role) ready"
+        case .waiting(let msg): return "\(role) waiting (\(msg))"
+        case .failed(let msg): return "\(role) failed (\(msg))"
+        case .permissionDenied: return "Local network permission denied"
         }
     }
 }

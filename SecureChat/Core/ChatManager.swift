@@ -57,6 +57,12 @@ final class ChatManager: ObservableObject {
         networkManager.start(deviceId: localDeviceId, displayName: displayName)
     }
 
+    /// Connect to a peer by IPv4/IPv6 address and port, used when Bonjour
+    /// discovery fails (TrollStore local-network permission, Internet Sharing, etc.).
+    func connectByIP(_ host: String, port: UInt16) {
+        networkManager.connectToAddress(host: host, port: port)
+    }
+
     func stop() {
         networkManager.stop()
     }
@@ -76,6 +82,8 @@ final class ChatManager: ObservableObject {
 
         networkManager.onPeerFound = { [weak self] peerId, peerName in
             guard let self = self else { return }
+            // Temporary ids used by Connect-by-IP must never become conversations.
+            guard !peerId.hasPrefix("pending-") else { return }
             DispatchQueue.main.async {
                 if var conv = self.conversations[peerId] {
                     conv.peer.displayName = peerName

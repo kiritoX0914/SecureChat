@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle id used by ldid / TrollStore when fake-signing the IPA. -->
+    <key>application-identifier</key>
+    <string>com.securechat.SecureChat</string>
+
+    <!-- Restricted multicast entitlement. Required on-device for some Bonjour /
+         mDNS paths; TrollStore preserves arbitrary entitlements via ldid. -->
+    <key>com.apple.developer.networking.multicast</key>
+    <true/>
+
+    <!-- Harmless App Sandbox network entitlements (used on macOS; ignored on iOS
+         if the process is not sandboxed). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Pre-grant the Local Network privacy service. TrollStore-installed apps
+         often never appear under Settings → Privacy → Local Network, so the
+         user cannot toggle it. com.apple.private.tcc.allow is the mechanism
+         TrollStore documents for skipping TCC prompts. We do not unsandbox
+         the app (no com.apple.private.security.no-sandbox); Local Network
+         enforcement lives in networkd / TCC, not the App Sandbox. -->
+    <key>com.apple.private.tcc.allow</key>
+    <array>
+        <string>kTCCServiceLocalNetwork</string>
+    </array>
+</dict>
+</plist>

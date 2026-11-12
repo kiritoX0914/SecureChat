@@ -7,19 +7,46 @@ import SwiftUI
 struct ChatListView: View {
     @EnvironmentObject var chatManager: ChatManager
 
+    var body: some View {
+        ChatListBody(network: chatManager.networkManager)
+            .environmentObject(chatManager)
+    }
+}
+
+struct ChatListBody: View {
+    @EnvironmentObject var chatManager: ChatManager
+    @ObservedObject var network: NetworkManager
+
     @State private var showSettings = false
     @State private var showNewChat = false
+    @State private var showManualConnect = false
 
     var body: some View {
         NavigationStack {
             Group {
                 if chatManager.sortedConversations.isEmpty {
-                    EmptyStateView(
-                        icon: "antenna.radiowaves.left.and.right",
-                        title: "No Peers Found",
-                        subtitle: "Looking for devices running SecureChat on your local network…",
-                        showSpinner: true
-                    )
+                    VStack(spacing: 16) {
+                        EmptyStateView(
+                            icon: "antenna.radiowaves.left.and.right",
+                            title: "No Peers Found",
+                            subtitle: emptySubtitle,
+                            showSpinner: !network.isLocalNetworkDenied
+                        )
+                        if !listenHint.isEmpty {
+                            Text(listenHint)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                        }
+                        Button {
+                            showManualConnect = true
+                        } label: {
+                            Label("Connect by IP", systemImage: "link")
+                                .fontWeight(.semibold)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 } else {
                     conversationList
                 }
@@ -34,7 +61,10 @@ struct ChatListView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 12) {
                         connectionIndicator
-                        // New Chat button
+                        Button { showManualConnect = true } label: {
+                            Image(systemName: "link")
+                        }
+                        .accessibilityLabel("Connect by IP")
                         Button { showNewChat = true } label: {
                             Image(systemName: "square.and.pencil")
                         }
@@ -47,6 +77,10 @@ struct ChatListView: View {
             }
             .sheet(isPresented: $showNewChat) {
                 NewChatView()
+                    .environmentObject(chatManager)
+            }
+            .sheet(isPresented: $showManualConnect) {
+                ManualConnectSheet()
                     .environmentObject(chatManager)
             }
             .navigationDestination(for: String.self) { peerId in
@@ -79,9 +113,9 @@ struct ChatListView: View {
     private var connectionIndicator: some View {
         HStack(spacing: 4) {
             Circle()
-                .fill(onlinePeerCount > 0 ? Color.green : Color.orange)
+                .fill(onlinePeerCount > 0 ? Color.green : (network.isLocalNetworkDenied ? Color.red : Color.orange))
                 .frame(width: 8, height: 8)
-            Text(onlinePeerCount > 0 ? "\(onlinePeerCount) online" : "Searching…")
+            Text(onlinePeerCount > 0 ? "\(onlinePeerCount) online" : (network.isLocalNetworkDenied ? "No LAN access" : "Searching…"))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -89,6 +123,26 @@ struct ChatListView: View {
 
     private var onlinePeerCount: Int {
         chatManager.sortedConversations.filter { $0.peer.isOnline }.count
+    }
+
+    // MARK: - Empty-state copy
+
+    private var emptySubtitle: String {
+        if network.isLocalNetworkDenied {
+            return "Local network permission denied. Automatic discovery is blocked — connect by IP instead."
+        }
+        return "Looking for devices running SecureChat on your local network…"
+    }
+
+    private var listenHint: String {
+        let addrs = network.localIPv4Addresses.map(\.address)
+        if let port = network.listeningPort, !addrs.isEmpty {
+            return "This device: " + addrs.map { "\($0):\(port)" }.joined(separator: ", ")
+        }
+        if let port = network.listeningPort {
+            return "Listening on port \(port)"
+        }
+        return network.discoveryStatus
     }
 
     // MARK: - Actions
@@ -211,18 +265,40 @@ struct ConversationRowView: View {
 
 struct NewChatView: View {
     @EnvironmentObject var chatManager: ChatManager
+
+    var body: some View {
+        NewChatBody(network: chatManager.networkManager)
+            .environmentObject(chatManager)
+    }
+}
+
+struct NewChatBody: View {
+    @EnvironmentObject var chatManager: ChatManager
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var network: NetworkManager
+    @State private var showManualConnect = false
 
     var body: some View {
         NavigationStack {
             Group {
                 if onlinePeers.isEmpty && offlinePeers.isEmpty {
-                    EmptyStateView(
-                        icon: "magnifyingglass",
-                        title: "Searching…",
-                        subtitle: "Looking for devices running SecureChat on your local network.",
-                        showSpinner: true
-                    )
+                    VStack(spacing: 16) {
+                        EmptyStateView(
+                            icon: "magnifyingglass",
+                            title: network.isLocalNetworkDenied ? "Discovery Blocked" : "Searching…",
+                            subtitle: network.isLocalNetworkDenied
+                                ? "Local network permission denied. Connect by IP instead."
+                                : "Looking for devices running SecureChat on your local network.",
+                            showSpinner: !network.isLocalNetworkDenied
+                        )
+                        Button {
+                            showManualConnect = true
+                        } label: {
+                            Label("Connect by IP", systemImage: "link")
+                                .fontWeight(.semibold)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 } else {
                     peerList
                 }
@@ -233,6 +309,18 @@ struct NewChatView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showManualConnect = true
+                    } label: {
+                        Image(systemName: "link")
+                    }
+                    .accessibilityLabel("Connect by IP")
+                }
+            }
+            .sheet(isPresented: $showManualConnect) {
+                ManualConnectSheet()
+                    .environmentObject(chatManager)
             }
         }
         .tint(TelegramColors.tint)
@@ -276,7 +364,7 @@ struct NewChatView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "info.circle")
                         .foregroundColor(.secondary)
-                    Text("Peers are discovered automatically via Bonjour on your local network. Make sure both devices are on the same WiFi.")
+                    Text("Peers are discovered automatically via Bonjour. If none appear (TrollStore or Internet Sharing), use Connect by IP.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

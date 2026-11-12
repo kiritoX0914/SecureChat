@@ -2,10 +2,10 @@ name: Build SecureChat iOS
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, lan-fix ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # 允许在 GitHub 网页上手动点击运行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -21,7 +21,6 @@ jobs:
           xcodebuild -version
           xcrun swift -version
 
-      # 步骤 1: 编译测试（模拟器环境，验证代码可编译性）
       - name: Build for iOS Simulator (Debug)
         run: |
           xcodebuild build \
@@ -33,7 +32,6 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      # 步骤 2: 构建真机 Archive（Release 架构，免证书编译）
       - name: Build iOS Archive (Release)
         run: |
           xcodebuild archive \
@@ -46,20 +44,55 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      # 步骤 3: 提取 .app 并打包为未签名的 .ipa 安装包
-      # 可直接通过 TrollStore 安装，或用 Sideloadly / AltStore / 爱思助手 进行自签安装
-      - name: Package Unsigned IPA
+      - name: Install ldid
         run: |
-          mkdir -p build/Payload
-          cp -r "build/SecureChat.xcarchive/Products/Applications/SecureChat.app" build/Payload/
-          cd build
-          zip -qr "SecureChat-unsigned.ipa" Payload
-          ls -lh SecureChat-unsigned.ipa
+          set -euo pipefail
+          brew install ldid-procursus
+          which ldid
+          ldid 2>&1 | head -n 5 || true
 
-      # 步骤 4: 上传 IPA 安装包为 GitHub Artifacts 供下载
-      - name: Upload Unsigned IPA Artifact
+      - name: Package fake-signed IPA
+        run: |
+          set -euo pipefail
+          mkdir -p build/Payload
+          cp -R "build/SecureChat.xcarchive/Products/Applications/SecureChat.app" build/Payload/
+
+          APP="build/Payload/SecureChat.app"
+          BIN="$APP/SecureChat"
+          PLIST="$APP/Info.plist"
+          ENTITLEMENTS="SecureChat.entitlements"
+
+          test -x "$BIN"
+          test -f "$ENTITLEMENTS"
+
+          # Info.plist must keep the keys TrollStore and Local Network privacy need.
+          for key in CFBundleExecutable NSLocalNetworkUsageDescription NSBonjourServices; do
+            /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null
+            echo "OK $key"
+          done
+
+          # Xcode was built with CODE_SIGNING_ALLOWED=NO, so entitlements are not
+          # embedded. Fake-sign with ldid so TrollStore preserves them.
+          ldid -S"$ENTITLEMENTS" "$BIN"
+
+          echo "===== ldid -e (embedded entitlements) ====="
+          ldid -e "$BIN" | tee build/embedded-entitlements.xml
+          grep -q "com.apple.developer.networking.multicast" build/embedded-entitlements.xml
+          grep -q "kTCCServiceLocalNetwork" build/embedded-entitlements.xml
+          grep -q "com.apple.security.network.client" build/embedded-entitlements.xml
+          grep -q "com.apple.security.network.server" build/embedded-entitlements.xml
+
+          cd build
+          zip -qr "SecureChat-lanfix.ipa" Payload
+          shasum -a 256 "SecureChat-lanfix.ipa" | tee SHA256SUMS
+          ls -lh "SecureChat-lanfix.ipa"
+
+      - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SecureChat-unsigned-ipa
-          path: build/SecureChat-unsigned.ipa
+          name: SecureChat-lanfix-ipa
+          path: |
+            build/SecureChat-lanfix.ipa
+            build/SHA256SUMS
+            build/embedded-entitlements.xml
           retention-days: 14
