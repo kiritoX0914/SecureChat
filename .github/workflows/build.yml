@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build & Package iOS App
-    runs-on: macos-15 # public repo; prefer arm64 macos-15 (macos-14 retired 2026-11-02)
+    runs-on: macos-latest # macos-15 public arm64 not acquired after 5m; try current default (macos-26)
 
     steps:
       - name: Checkout repository
