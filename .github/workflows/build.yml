@@ -1,0 +1,65 @@
+name: Build SecureChat iOS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # 允许在 GitHub 网页上手动点击运行
+
+jobs:
+  build:
+    name: Build & Package iOS App
+    runs-on: macos-14 # GitHub 官方 macOS 虚拟机 (Apple Silicon M2, 自带 Xcode 15/16)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode Version
+        run: |
+          xcodebuild -version
+          xcrun swift -version
+
+      # 步骤 1: 编译测试（模拟器环境，验证代码可编译性）
+      - name: Build for iOS Simulator (Debug)
+        run: |
+          xcodebuild build \
+            -project SecureChat.xcodeproj \
+            -scheme SecureChat \
+            -destination "generic/platform=iOS Simulator" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # 步骤 2: 构建真机 Archive（Release 架构，免证书编译）
+      - name: Build iOS Archive (Release)
+        run: |
+          xcodebuild archive \
+            -project SecureChat.xcodeproj \
+            -scheme SecureChat \
+            -destination "generic/platform=iOS" \
+            -archivePath "build/SecureChat.xcarchive" \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # 步骤 3: 提取 .app 并打包为未签名的 .ipa 安装包
+      # 可直接通过 TrollStore 安装，或用 Sideloadly / AltStore / 爱思助手 进行自签安装
+      - name: Package Unsigned IPA
+        run: |
+          mkdir -p build/Payload
+          cp -r "build/SecureChat.xcarchive/Products/Applications/SecureChat.app" build/Payload/
+          cd build
+          zip -qr "SecureChat-unsigned.ipa" Payload
+          ls -lh SecureChat-unsigned.ipa
+
+      # 步骤 4: 上传 IPA 安装包为 GitHub Artifacts 供下载
+      - name: Upload Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureChat-unsigned-ipa
+          path: build/SecureChat-unsigned.ipa
+          retention-days: 14

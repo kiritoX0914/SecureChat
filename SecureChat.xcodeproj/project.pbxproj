@@ -1,0 +1,411 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		F700EE44C7CFF2E7841B9943 /* SecureChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3A4B5ADF4B1D3483DD09173 /* SecureChatApp.swift */; };
+		5ED5FD00A028F13976FCD6D2 /* ChatManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED1510CF600A2FECD10F8E /* ChatManager.swift */; };
+		DD8D6B2EE4194DA5967755D4 /* PersistenceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8F9B39F9D543A9CBAE426B /* PersistenceManager.swift */; };
+		3998208012A047737F501698 /* CryptoEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B495A66773534112E1D3AA15 /* CryptoEngine.swift */; };
+		D2F85E202E1CC78242B66AB3 /* SignalCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 285B0E76F10265E8CB2D2BCA /* SignalCrypto.swift */; };
+		9B8C0BD2649C7D43A4F8C9F4 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = D384857BE108E6B677E6B89C /* Models.swift */; };
+		45E3869B0DB441BD4E1DBAFB /* LANDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8732EC57F93E61CC0DCF50 /* LANDiscovery.swift */; };
+		ECB9538C36053ED600326946 /* NetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 014F1AF2BC6D40D19DF71AD8 /* NetworkManager.swift */; };
+		B712269D21D77D684E1A931B /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD2FE9702206F6594CFC4CAD /* ChatListView.swift */; };
+		1D4AE4629A3DD2F71CB47B06 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A95B3CC8057FE2248BD6271 /* Components.swift */; };
+		A0D6B37AA74D8239F24075C0 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 052BB0BF5BE2709511868E2F /* ConversationView.swift */; };
+		D562FF749E14FB471FF16E2C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A588CE1D7F85EDB20A43A33C /* SettingsView.swift */; };
+		EB6A90B9989A360E33DE8CBA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2845B5158A3A111DC0A30765 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		7AEA3EB54C89C58400D6A831 /* SecureChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SecureChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F3A4B5ADF4B1D3483DD09173 /* SecureChatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureChatApp.swift; sourceTree = "<group>"; };
+		16ED1510CF600A2FECD10F8E /* ChatManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatManager.swift; sourceTree = "<group>"; };
+		CB8F9B39F9D543A9CBAE426B /* PersistenceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceManager.swift; sourceTree = "<group>"; };
+		B495A66773534112E1D3AA15 /* CryptoEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoEngine.swift; sourceTree = "<group>"; };
+		285B0E76F10265E8CB2D2BCA /* SignalCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalCrypto.swift; sourceTree = "<group>"; };
+		D384857BE108E6B677E6B89C /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		3D8732EC57F93E61CC0DCF50 /* LANDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANDiscovery.swift; sourceTree = "<group>"; };
+		014F1AF2BC6D40D19DF71AD8 /* NetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkManager.swift; sourceTree = "<group>"; };
+		CD2FE9702206F6594CFC4CAD /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
+		5A95B3CC8057FE2248BD6271 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		052BB0BF5BE2709511868E2F /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		A588CE1D7F85EDB20A43A33C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		63DBF5D46C35455A376CBAC7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		2845B5158A3A111DC0A30765 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9D0C7678B4E3378CEA6FAE86 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		19C82112E9DC2771A562C526 = {
+			isa = PBXGroup;
+			children = (
+				4F783C2DA23C59B2CFD52D7C /* SecureChat */,
+				7FF56120FDE7D75FE4FEA536 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7FF56120FDE7D75FE4FEA536 = {
+			isa = PBXGroup;
+			children = (
+				7AEA3EB54C89C58400D6A831 /* SecureChat.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4F783C2DA23C59B2CFD52D7C = {
+			isa = PBXGroup;
+			children = (
+				F682C33562E4A0880E11CBEB /* Core */,
+				C1616B09D09578F7F4AB78B7 /* Crypto */,
+				3F7FC70FD57E951A9D0C4219 /* Models */,
+				080E6A5720D7228F7F8CAA89 /* Network */,
+				F3E5B61ACB3D942D0C643D2C /* Views */,
+				F3A4B5ADF4B1D3483DD09173 /* SecureChatApp.swift */,
+				2845B5158A3A111DC0A30765 /* Assets.xcassets */,
+				63DBF5D46C35455A376CBAC7 /* Info.plist */,
+			);
+			path = SecureChat;
+			sourceTree = "<group>";
+		};
+		F682C33562E4A0880E11CBEB = {
+			isa = PBXGroup;
+			children = (
+				16ED1510CF600A2FECD10F8E /* ChatManager.swift */,
+				CB8F9B39F9D543A9CBAE426B /* PersistenceManager.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		C1616B09D09578F7F4AB78B7 = {
+			isa = PBXGroup;
+			children = (
+				B495A66773534112E1D3AA15 /* CryptoEngine.swift */,
+				285B0E76F10265E8CB2D2BCA /* SignalCrypto.swift */,
+			);
+			path = Crypto;
+			sourceTree = "<group>";
+		};
+		3F7FC70FD57E951A9D0C4219 = {
+			isa = PBXGroup;
+			children = (
+				D384857BE108E6B677E6B89C /* Models.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		080E6A5720D7228F7F8CAA89 = {
+			isa = PBXGroup;
+			children = (
+				3D8732EC57F93E61CC0DCF50 /* LANDiscovery.swift */,
+				014F1AF2BC6D40D19DF71AD8 /* NetworkManager.swift */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
+		F3E5B61ACB3D942D0C643D2C = {
+			isa = PBXGroup;
+			children = (
+				CD2FE9702206F6594CFC4CAD /* ChatListView.swift */,
+				5A95B3CC8057FE2248BD6271 /* Components.swift */,
+				052BB0BF5BE2709511868E2F /* ConversationView.swift */,
+				A588CE1D7F85EDB20A43A33C /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F8B35B80CE6C8960D385AFC1 /* SecureChat */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CD4AA6C4506568E432A010BB /* Build configuration list for PBXNativeTarget "SecureChat" */;
+			buildPhases = (
+				0F8103B45A569A05DCFB0544 /* Sources */,
+				9D0C7678B4E3378CEA6FAE86 /* Frameworks */,
+				85CCF5A471F73D7464D36A48 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SecureChat;
+			productName = SecureChat;
+			productReference = 7AEA3EB54C89C58400D6A831 /* SecureChat.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		6F16F26AA88B88CF479E4C3C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					F8B35B80CE6C8960D385AFC1 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 89B991AB7AB597B2EC34058B /* Build configuration list for PBXProject "SecureChat" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 19C82112E9DC2771A562C526;
+			productRefGroup = 7FF56120FDE7D75FE4FEA536 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F8B35B80CE6C8960D385AFC1 /* SecureChat */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		85CCF5A471F73D7464D36A48 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EB6A90B9989A360E33DE8CBA /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0F8103B45A569A05DCFB0544 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F700EE44C7CFF2E7841B9943 /* SecureChatApp.swift in Sources */,
+				5ED5FD00A028F13976FCD6D2 /* ChatManager.swift in Sources */,
+				DD8D6B2EE4194DA5967755D4 /* PersistenceManager.swift in Sources */,
+				3998208012A047737F501698 /* CryptoEngine.swift in Sources */,
+				D2F85E202E1CC78242B66AB3 /* SignalCrypto.swift in Sources */,
+				9B8C0BD2649C7D43A4F8C9F4 /* Models.swift in Sources */,
+				45E3869B0DB441BD4E1DBAFB /* LANDiscovery.swift in Sources */,
+				ECB9538C36053ED600326946 /* NetworkManager.swift in Sources */,
+				B712269D21D77D684E1A931B /* ChatListView.swift in Sources */,
+				1D4AE4629A3DD2F71CB47B06 /* Components.swift in Sources */,
+				A0D6B37AA74D8239F24075C0 /* ConversationView.swift in Sources */,
+				D562FF749E14FB471FF16E2C /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BFB91EDF44B6176F21776DBE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.5;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		8DB2FA4574AFD7F6D99D46B3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.5;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		7E94D75C5D146DE5F31A6EF8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SecureChat/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SecureChat;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.securechat.SecureChat;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A260AFB7E548DA3DD7606435 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SecureChat/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SecureChat;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.5;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.securechat.SecureChat;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		89B991AB7AB597B2EC34058B /* Build configuration list for PBXProject "SecureChat" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BFB91EDF44B6176F21776DBE /* Debug */,
+				8DB2FA4574AFD7F6D99D46B3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CD4AA6C4506568E432A010BB /* Build configuration list for PBXNativeTarget "SecureChat" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7E94D75C5D146DE5F31A6EF8 /* Debug */,
+				A260AFB7E548DA3DD7606435 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 6F16F26AA88B88CF479E4C3C /* Project object */;
+}
