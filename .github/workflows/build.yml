@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: Build & Package iOS App
-    runs-on: macos-14 # GitHub 官方 macOS 虚拟机 (Apple Silicon M2, 自带 Xcode 15/16)
+    runs-on: macos-15 # GitHub 官方 macOS 虚拟机 (Apple Silicon; macos-14 retired 2026-11-02)
 
     steps:
       - name: Checkout repository
