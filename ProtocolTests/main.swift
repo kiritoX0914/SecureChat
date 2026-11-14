@@ -69,10 +69,16 @@ final class Runner {
     func groupId() -> String? { cm.conversations.values.first { $0.isGroup }?.id }
 
     func writePort() {
-        at(1.5) {
-            let port = self.cm.networkManager.listeningPort ?? 0
-            try? "\(port)".write(toFile: "\(self.dir)/\(self.role).port", atomically: true, encoding: .utf8)
-            self.log("listening on \(port)")
+        Task { @MainActor in
+            for _ in 0..<40 {
+                if let port = self.cm.networkManager.listeningPort, port > 0 {
+                    try? "\(port)".write(toFile: "\(self.dir)/\(self.role).port", atomically: true, encoding: .utf8)
+                    self.log("listening on \(port)")
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            self.log("listener port never became available")
         }
     }
 
@@ -162,8 +168,10 @@ final class Runner {
 
         case "C":
             at(3) { self.cm.connectByIP("127.0.0.1", port: 47823) }
-            at(4) {
+            at(6) {
                 let p = self.readPort("B")
+                self.log("B port = \(p)")
+                self.check("C found B's port", p > 0)
                 if p > 0 { self.cm.connectByIP("127.0.0.1", port: p) }
             }
             at(37) {
