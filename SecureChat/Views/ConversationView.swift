@@ -22,8 +22,7 @@ struct ConversationView: View {
     @State private var replyingTo: ChatMessage?
 
     // Pickers
-    @State private var showPhotoPicker = false
-    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var mediaPicker: MediaPickerRequest?
     @State private var showFileImporter = false
 
     // Viewers
@@ -40,6 +39,8 @@ struct ConversationView: View {
     @State private var pendingDelete: Set<UUID> = []
     @State private var showDeleteDialog = false
     @State private var showClearDialog = false
+    @State private var showDeleteChatDialog = false
+    @Environment(\.dismiss) private var dismiss
     @State private var showGroupInfo = false
     @State private var highlightedId: UUID?
     @State private var scrollRequest: UUID?
@@ -95,6 +96,11 @@ struct ConversationView: View {
                         Button(role: .destructive) {
                             showClearDialog = true
                         } label: { Label("Clear Chat", systemImage: "trash") }
+                        Button(role: .destructive) {
+                            showDeleteChatDialog = true
+                        } label: {
+                            Label(isGroup ? "Leave & Delete Group" : "Delete Chat", systemImage: "trash.slash")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -110,10 +116,12 @@ struct ConversationView: View {
         .onDisappear {
             sendTypingStop()
         }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems,
-                      maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
-        .onChange(of: photoItems) { items in
-            handlePickedItems(items)
+        .sheet(item: $mediaPicker) { request in
+            MediaPicker(filter: request.filter, selectionLimit: 10) { results in
+                mediaPicker = nil
+                handlePicked(results)
+            }
+            .ignoresSafeArea()
         }
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item],
                       allowsMultipleSelection: true) { result in
@@ -164,6 +172,19 @@ struct ConversationView: View {
                 chatManager.clearChat(peerId, forEveryone: true)
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(isGroup ? "Leave and delete this group?" : "Delete this chat and contact?",
+                            isPresented: $showDeleteChatDialog, titleVisibility: .visible) {
+            Button(isGroup ? "Leave and Delete" : "Delete Chat", role: .destructive) {
+                let id = peerId
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    chatManager.deleteConversation(peerId: id)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Messages, attachments and the saved address are removed from this device.")
         }
         .alert("SecureChat", isPresented: Binding(
             get: { chatManager.lastError != nil },
@@ -286,10 +307,10 @@ struct ConversationView: View {
                 onOpenAttachment: { msg in
                     if isSelecting { toggleSelection(msg.id) } else { open(msg) }
                 },
-                onRetry: { chatManager.resend(message.id, in: peerId) }
+                onRetry: { chatManager.resend(message.id, in: peerId) },
+                menu: isSelecting ? nil : { AnyView(contextMenu(for: message, isOutgoing: isOutgoing)) }
             )
             .allowsHitTesting(!isSelecting)
-            .contextMenu { contextMenu(for: message, isOutgoing: isOutgoing) }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
@@ -419,30 +440,21 @@ struct ConversationView: View {
             Divider()
 
             if let reply = replyingTo {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrowshape.turn.up.left.fill")
-                        .foregroundColor(TelegramColors.tint)
-                    ReplyQuoteView(sender: chatManager.senderName(for: reply, in: peerId),
-                                   text: reply.previewText, isOutgoing: false)
-                    Spacer()
-                    Button {
-                        replyingTo = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
+                ReplyComposerBar(sender: reply.senderId == chatManager.localDeviceId
+                                    ? "yourself" : chatManager.senderName(for: reply, in: peerId),
+                                 text: reply.previewText) {
+                    replyingTo = nil
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 6)
-                .background(Color(.systemBackground))
             }
 
             HStack(alignment: .bottom, spacing: 6) {
                 Menu {
                     Button {
-                        showPhotoPicker = true
+                        mediaPicker = MediaPickerRequest(filter: .any(of: [.images, .videos]))
                     } label: { Label("Photo or Video", systemImage: "photo.on.rectangle") }
+                    Button {
+                        mediaPicker = MediaPickerRequest(filter: .videos)
+                    } label: { Label("Video", systemImage: "video") }
                     Button {
                         showFileImporter = true
                     } label: { Label("File", systemImage: "doc") }
@@ -537,33 +549,22 @@ struct ConversationView: View {
         }
     }
 
-    private func handlePickedItems(_ items: [PhotosPickerItem]) {
+    private func handlePicked(_ items: [PickedMedia]) {
         guard !items.isEmpty else { return }
         let reply = replyingTo
         replyingTo = nil
-        let convId = peerId
-        Task {
-            for item in items {
-                let isMovie = item.supportedContentTypes.contains { $0.conforms(to: .movie) || $0.conforms(to: .video) }
-                if isMovie {
-                    if let movie = try? await item.loadTransferable(type: PickedMovie.self) {
-                        let ext = movie.url.pathExtension
-                        let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? "video/quicktime"
-                        let name = "VID_\(DateFormatter.fileTimestamp.string(from: Date())).\(ext.isEmpty ? "mov" : ext)"
-                        await MainActor.run {
-                            chatManager.sendFile(at: movie.url, filename: name, mimeType: mime, to: convId, replyTo: reply)
-                        }
-                    } else {
-                        await MainActor.run { chatManager.lastError = "Could not load the video" }
-                    }
-                } else if let data = try? await item.loadTransferable(type: Data.self) {
-                    let filename = "IMG_\(DateFormatter.fileTimestamp.string(from: Date())).jpg"
-                    await MainActor.run {
-                        chatManager.sendImage(data, filename: filename, to: convId, replyTo: reply)
-                    }
-                }
+        for item in items {
+            switch item {
+            case .video(let url, let mime):
+                let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+                let name = "VID_\(DateFormatter.fileTimestamp.string(from: Date())).\(ext)"
+                chatManager.sendFile(at: url, filename: name, mimeType: mime, to: peerId, replyTo: reply)
+            case .image(let data):
+                let filename = "IMG_\(DateFormatter.fileTimestamp.string(from: Date())).jpg"
+                chatManager.sendImage(data, filename: filename, to: peerId, replyTo: reply)
+            case .failed(let reason):
+                chatManager.lastError = reason
             }
-            await MainActor.run { photoItems = [] }
         }
     }
 

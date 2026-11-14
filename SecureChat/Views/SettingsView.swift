@@ -206,7 +206,7 @@ struct SettingsBody: View {
             HStack {
                 Text("Version")
                 Spacer()
-                Text("1.2.0")
+                Text("1.3.0")
                     .foregroundColor(.secondary)
             }
             HStack {
@@ -348,8 +348,12 @@ struct LocalNetworkForm: View {
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Auto-reconnect")
-                    Text(network.scanStatus.isEmpty ? "Remembered peers are re-dialed every 5 s; the local subnet is scanned periodically." : network.scanStatus)
+                    Text(NetworkManager.autoDiscovery ? "Auto-reconnect" : "Scan Network")
+                    Text(network.scanStatus.isEmpty
+                         ? (NetworkManager.autoDiscovery
+                            ? "Remembered peers are re-dialed every 5 s; the local subnet is scanned periodically."
+                            : "Auto scan is off on Mac. Phones connect to this Mac automatically.")
+                         : network.scanStatus)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -413,7 +417,10 @@ struct LocalNetworkForm: View {
     }
 
     private var networkFooter: String {
-        "Peers are found automatically: Bonjour where allowed, remembered addresses (re-dialed every few seconds and whenever the app returns to the foreground), a UDP beacon, and a scan of your local /24 subnet on port \(NetworkManager.defaultTCPPort). TrollStore installs cannot use Bonjour, but the scan still works. You only need Connect by IP if the devices are on different subnets."
+        if !NetworkManager.autoDiscovery {
+            return "On the Mac, SecureChat only listens on port \(NetworkManager.defaultTCPPort) – your phones find and connect to it automatically. It never scans in the background; use Scan Now or Connect by IP when you need to reach a peer yourself."
+        }
+        return "Peers are found automatically: Bonjour where allowed, remembered addresses (re-dialed every few seconds and whenever the app returns to the foreground), a UDP beacon, and a scan of your local /24 subnet on port \(NetworkManager.defaultTCPPort). TrollStore installs cannot use Bonjour, but the scan still works. You only need Connect by IP if the devices are on different subnets."
     }
 
     private func addressLine(_ item: NetworkManager.LocalAddress) -> String {

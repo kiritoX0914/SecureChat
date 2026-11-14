@@ -6,6 +6,7 @@ import SwiftUI
 import UIKit
 import AVKit
 import UniformTypeIdentifiers
+import PhotosUI
 
 // MARK: - Telegram-style Colors
 
@@ -29,7 +30,12 @@ enum TelegramColors {
     }
 
     static let outgoingBubble = Color(red: 0.0, green: 0.48, blue: 1.0)
-    static let incomingBubble = Color(.systemGray6)
+    /// White on the light grey chat background, dark grey in dark mode.
+    static let incomingBubble = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 1)
+            : UIColor.white
+    })
 }
 
 // MARK: - AvatarView
@@ -95,6 +101,67 @@ enum AttachmentImageCache {
     }
 }
 
+// MARK: - Bubble layouts
+
+/// Places a single bubble on the leading or trailing edge of the row and caps
+/// its width (≈75 % of the row, at most 560 pt) so it hugs its content.
+struct BubbleRowLayout: Layout {
+    var isOutgoing: Bool
+    var fraction: CGFloat = 0.75
+    var cap: CGFloat = 560
+
+    private func limit(_ width: CGFloat) -> CGFloat {
+        guard width.isFinite else { return cap }
+        return max(120, min(width * fraction, cap))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let bubble = subviews.first else { return .zero }
+        let width = proposal.width ?? cap / fraction
+        let size = bubble.sizeThatFits(ProposedViewSize(width: limit(width), height: nil))
+        return CGSize(width: width.isFinite ? width : size.width, height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let bubble = subviews.first else { return }
+        let size = bubble.sizeThatFits(ProposedViewSize(width: limit(bounds.width), height: nil))
+        let x = isOutgoing ? bounds.maxX - size.width : bounds.minX
+        bubble.place(at: CGPoint(x: x, y: bounds.minY), anchor: .topLeading,
+                     proposal: ProposedViewSize(width: size.width, height: size.height))
+    }
+}
+
+/// Vertical stack for bubble contents: as wide as the widest child (never
+/// wider), every child leading-aligned except the last (time/status), which
+/// sits on the trailing edge.
+struct BubbleContentLayout: Layout {
+    var spacing: CGFloat = 4
+
+    private func sizes(_ proposal: ProposedViewSize, _ subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil)) }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let s = sizes(proposal, subviews)
+        let width = min(s.map(\.width).max() ?? 0, proposal.width ?? .infinity)
+        let height = s.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, s.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let s = sizes(ProposedViewSize(width: bounds.width, height: nil), subviews)
+        var y = bounds.minY
+        for (i, sub) in subviews.enumerated() {
+            let size = CGSize(width: min(s[i].width, bounds.width), height: s[i].height)
+            let isLast = i == subviews.count - 1
+            let x = isLast ? bounds.maxX - size.width : bounds.minX
+            sub.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                      proposal: ProposedViewSize(width: size.width, height: size.height))
+            y += size.height + spacing
+        }
+    }
+}
+
 // MARK: - MessageBubbleView
 
 struct MessageBubbleView: View {
@@ -106,85 +173,109 @@ struct MessageBubbleView: View {
     var onTapReply: ((UUID) -> Void)? = nil
     var onOpenAttachment: ((ChatMessage) -> Void)? = nil
     var onRetry: (() -> Void)? = nil
+    /// Context menu attached to the bubble itself (not the whole row).
+    var menu: (() -> AnyView)? = nil
+
+    @Environment(\.colorScheme) private var colorScheme
 
     private var foreground: Color { isOutgoing ? .white : .primary }
 
     var body: some View {
-        HStack {
-            if isOutgoing { Spacer(minLength: 60) }
+        BubbleRowLayout(isOutgoing: isOutgoing) {
+            if let menu {
+                bubble
+                    .contentShape(.contextMenuPreview, BubbleShape(isOutgoing: isOutgoing))
+                    .contextMenu { menu() }
+            } else {
+                bubble
+            }
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 4) {
-                if let senderName, !isOutgoing {
-                    Text(senderName)
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(TelegramColors.avatarColor(for: senderName))
-                }
+    private var bubble: some View {
+        BubbleContentLayout(spacing: 4) {
+            if let senderName, !isOutgoing {
+                Text(senderName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(TelegramColors.avatarColor(for: senderName))
+                    .lineLimit(1)
+            }
 
-                if message.replyToId != nil {
-                    ReplyQuoteView(sender: message.replyToSender ?? "",
-                                   text: message.replyToText ?? "",
-                                   isOutgoing: isOutgoing)
-                        .onTapGesture {
-                            if let id = message.replyToId { onTapReply?(id) }
-                        }
-                }
-
-                switch message.contentType {
-                case .image:
-                    ImageContentView(message: message, isOutgoing: isOutgoing)
-                        .onTapGesture { onOpenAttachment?(message) }
-                case .file:
-                    if message.isVideo {
-                        VideoContentView(message: message, isOutgoing: isOutgoing, progress: progress)
-                            .onTapGesture { onOpenAttachment?(message) }
-                    } else {
-                        FileContentView(message: message, isOutgoing: isOutgoing, progress: progress)
-                            .onTapGesture { onOpenAttachment?(message) }
+            if message.replyToId != nil {
+                ReplyQuoteView(sender: message.replyToSender ?? "",
+                               text: message.replyToText ?? "",
+                               isOutgoing: isOutgoing)
+                    .onTapGesture {
+                        if let id = message.replyToId { onTapReply?(id) }
                     }
-                case .text:
-                    Text(message.text)
-                        .font(.body)
-                        .foregroundColor(foreground)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
+            }
 
-                HStack(spacing: 3) {
-                    Spacer(minLength: 0)
-                    Text(message.timestamp, style: .time)
-                        .font(.caption2)
-                        .foregroundColor(isOutgoing ? .white.opacity(0.7) : .secondary)
+            content
 
-                    if isOutgoing {
-                        StatusIconView(status: message.status)
-                        if message.status == .failed, let onRetry {
-                            Button(action: onRetry) {
-                                Image(systemName: "arrow.clockwise.circle.fill")
-                                    .font(.system(size: 13))
-                                    .foregroundColor(.white)
-                            }
-                            .buttonStyle(.plain)
-                        }
+            timeRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            BubbleShape(isOutgoing: isOutgoing)
+                .fill(isOutgoing ? TelegramColors.outgoingBubble : TelegramColors.incomingBubble)
+        )
+        .overlay(
+            BubbleShape(isOutgoing: isOutgoing)
+                .stroke(highlighted ? Color.yellow
+                        : (!isOutgoing && colorScheme == .light ? Color.black.opacity(0.08) : Color.clear),
+                        lineWidth: highlighted ? 3 : 0.5)
+        )
+        .contentShape(BubbleShape(isOutgoing: isOutgoing))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch message.contentType {
+        case .image:
+            ImageContentView(message: message, isOutgoing: isOutgoing)
+                .onTapGesture { onOpenAttachment?(message) }
+        case .file:
+            if message.isVideo {
+                VideoContentView(message: message, isOutgoing: isOutgoing, progress: progress)
+                    .onTapGesture { onOpenAttachment?(message) }
+            } else {
+                FileContentView(message: message, isOutgoing: isOutgoing, progress: progress)
+                    .onTapGesture { onOpenAttachment?(message) }
+            }
+        case .text:
+            Text(message.text)
+                .font(.body)
+                .foregroundColor(foreground)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var timeRow: some View {
+        HStack(spacing: 3) {
+            Text(message.timestamp, style: .time)
+                .font(.caption2)
+                .foregroundColor(isOutgoing ? .white.opacity(0.75) : .secondary)
+
+            if isOutgoing {
+                StatusIconView(status: message.status)
+                if message.status == .failed, let onRetry {
+                    Button(action: onRetry) {
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white)
                     }
+                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                isOutgoing ? TelegramColors.outgoingBubble : TelegramColors.incomingBubble
-            )
-            .clipShape(BubbleShape(isOutgoing: isOutgoing))
-            .overlay(
-                BubbleShape(isOutgoing: isOutgoing)
-                    .stroke(Color.yellow, lineWidth: highlighted ? 3 : 0)
-            )
-
-            if !isOutgoing { Spacer(minLength: 60) }
         }
+        .fixedSize()
     }
 }
 
-// MARK: - Reply quote
+// MARK: - Reply quote (inside a bubble)
 
 struct ReplyQuoteView: View {
     let sender: String
@@ -192,28 +283,76 @@ struct ReplyQuoteView: View {
     let isOutgoing: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .center, spacing: 6) {
             RoundedRectangle(cornerRadius: 1.5)
                 .fill(isOutgoing ? Color.white : TelegramColors.tint)
                 .frame(width: 3)
+                .frame(maxHeight: .infinity)
             VStack(alignment: .leading, spacing: 1) {
-                Text(sender)
+                Text(sender.isEmpty ? "Reply" : sender)
                     .font(.caption.weight(.semibold))
                     .foregroundColor(isOutgoing ? .white : TelegramColors.tint)
                     .lineLimit(1)
-                Text(text)
+                Text(text.isEmpty ? " " : text)
                     .font(.caption)
                     .foregroundColor(isOutgoing ? .white.opacity(0.85) : .secondary)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.vertical, 3)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
+        .padding(.trailing, 8)
+        .padding(.leading, 0)
+        .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isOutgoing ? Color.white.opacity(0.15) : TelegramColors.tint.opacity(0.08))
+                .fill(isOutgoing ? Color.white.opacity(0.15) : TelegramColors.tint.opacity(0.10))
         )
-        .frame(maxWidth: 260, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - Reply bar above the composer (Telegram style)
+
+struct ReplyComposerBar: View {
+    let sender: String
+    let text: String
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .font(.system(size: 15))
+                .foregroundColor(TelegramColors.tint)
+            RoundedRectangle(cornerRadius: 1)
+                .fill(TelegramColors.tint)
+                .frame(width: 2, height: 32)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Reply to \(sender)")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(TelegramColors.tint)
+                    .lineLimit(1)
+                Text(text)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -422,9 +561,8 @@ struct FileContentView: View {
                         .foregroundColor(isOutgoing ? .white.opacity(0.7) : .secondary)
                 }
 
-                Spacer(minLength: 0)
             }
-            .frame(maxWidth: 260)
+            .frame(minWidth: 160, alignment: .leading)
             .contentShape(Rectangle())
         }
     }
@@ -903,3 +1041,110 @@ struct MacComposerView: UIViewRepresentable {
     }
 }
 #endif
+
+// MARK: - Photo library picker (PHPicker; images and videos)
+
+struct MediaPickerRequest: Identifiable {
+    let id = UUID()
+    let filter: PHPickerFilter
+}
+
+enum PickedMedia {
+    case image(Data)
+    case video(URL, mimeType: String)
+    case failed(String)
+}
+
+/// PHPickerViewController wrapper. Videos are copied out of the picker's
+/// temporary file inside the load callback (the file is deleted afterwards).
+/// No photo-library permission is needed. Works on iOS 16 and Mac Catalyst.
+struct MediaPicker: UIViewControllerRepresentable {
+    let filter: PHPickerFilter
+    var selectionLimit: Int = 10
+    let onFinish: ([PickedMedia]) -> Void
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = filter
+        config.selectionLimit = selectionLimit
+        config.preferredAssetRepresentationMode = .current
+        config.selection = .ordered
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onFinish: onFinish) }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let onFinish: ([PickedMedia]) -> Void
+        init(onFinish: @escaping ([PickedMedia]) -> Void) { self.onFinish = onFinish }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            guard !results.isEmpty else {
+                onFinish([])
+                return
+            }
+            let box = ResultBox(count: results.count)
+            let group = DispatchGroup()
+            for (i, result) in results.enumerated() {
+                let provider = result.itemProvider
+                let movieType = provider.registeredTypeIdentifiers
+                    .compactMap { UTType($0) }
+                    .first { $0.conforms(to: .movie) || $0.conforms(to: .video) }
+                if let movieType {
+                    group.enter()
+                    provider.loadFileRepresentation(forTypeIdentifier: movieType.identifier) { url, error in
+                        defer { group.leave() }
+                        guard let url else {
+                            box[i] = .failed("Could not load the video: \(error?.localizedDescription ?? "unknown error")")
+                            return
+                        }
+                        let ext = url.pathExtension.isEmpty
+                            ? (movieType.preferredFilenameExtension ?? "mov") : url.pathExtension
+                        let dest = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("VID_\(UUID().uuidString.prefix(8)).\(ext)")
+                        do {
+                            try? FileManager.default.removeItem(at: dest)
+                            try FileManager.default.copyItem(at: url, to: dest)
+                            let mime = UTType(filenameExtension: ext)?.preferredMIMEType
+                                ?? movieType.preferredMIMEType ?? "video/quicktime"
+                            box[i] = .video(dest, mimeType: mime)
+                        } catch {
+                            box[i] = .failed("Could not copy the video: \(error.localizedDescription)")
+                        }
+                    }
+                } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                    group.enter()
+                    provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
+                        defer { group.leave() }
+                        if let data {
+                            box[i] = .image(data)
+                        } else {
+                            box[i] = .failed("Could not load the photo: \(error?.localizedDescription ?? "unknown error")")
+                        }
+                    }
+                } else {
+                    box[i] = .failed("Unsupported item")
+                }
+            }
+            group.notify(queue: .main) { [onFinish] in
+                onFinish(box.values)
+            }
+        }
+    }
+
+    /// Thread-safe slot array; item-provider callbacks run on arbitrary queues.
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [PickedMedia?]
+        init(count: Int) { items = Array(repeating: nil, count: count) }
+        subscript(i: Int) -> PickedMedia? {
+            get { lock.lock(); defer { lock.unlock() }; return items[i] }
+            set { lock.lock(); items[i] = newValue; lock.unlock() }
+        }
+        var values: [PickedMedia] { lock.lock(); defer { lock.unlock() }; return items.compactMap { $0 } }
+    }
+}

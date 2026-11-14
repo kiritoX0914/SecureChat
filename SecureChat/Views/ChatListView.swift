@@ -22,6 +22,7 @@ struct ChatListBody: View {
     @State private var showNewChat = false
     @State private var showNewGroup = false
     @State private var showManualConnect = false
+    @State private var pendingDeleteChat: Conversation?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -104,6 +105,23 @@ struct ChatListBody: View {
                 ManualConnectSheet()
                     .environmentObject(chatManager)
             }
+            .confirmationDialog(deleteChatTitle,
+                                isPresented: Binding(get: { pendingDeleteChat != nil },
+                                                     set: { if !$0 { pendingDeleteChat = nil } }),
+                                titleVisibility: .visible) {
+                Button(pendingDeleteChat?.isGroup == true ? "Leave and Delete" : "Delete Chat", role: .destructive) {
+                    if let conv = pendingDeleteChat {
+                        path.removeAll { $0 == conv.id }
+                        chatManager.deleteConversation(peerId: conv.id)
+                    }
+                    pendingDeleteChat = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDeleteChat = nil }
+            } message: {
+                Text(pendingDeleteChat?.isGroup == true
+                     ? "You will leave the group and its messages are removed from this device."
+                     : "Removes the contact, all messages and its saved address from this device. It comes back only if they connect again.")
+            }
             .navigationDestination(for: String.self) { convId in
                 if chatManager.conversations[convId] != nil {
                     ConversationView(peerId: convId)
@@ -142,8 +160,21 @@ struct ChatListBody: View {
                                         isOnline: chatManager.isOnline(conversation),
                                         senderLabel: senderLabel(conversation))
                 }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        pendingDeleteChat = conversation
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+                .contextMenu {
+                    Button(role: .destructive) {
+                        pendingDeleteChat = conversation
+                    } label: {
+                        Label(conversation.isGroup ? "Leave & Delete Group" : "Delete Chat", systemImage: "trash")
+                    }
+                }
             }
-            .onDelete(perform: deleteConversation)
         }
         .listStyle(.plain)
         .refreshable { network.scanNow() }
@@ -162,7 +193,8 @@ struct ChatListBody: View {
             Circle()
                 .fill(onlinePeerCount > 0 ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
-            Text(onlinePeerCount > 0 ? "\(onlinePeerCount) online" : "Searching…")
+            Text(onlinePeerCount > 0 ? "\(onlinePeerCount) online"
+                 : (NetworkManager.autoDiscovery ? "Searching…" : "Waiting for peers"))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -189,11 +221,9 @@ struct ChatListBody: View {
 
     // MARK: - Actions
 
-    private func deleteConversation(at offsets: IndexSet) {
-        let idsToDelete = offsets.map { chatManager.sortedConversations[$0].id }
-        for convId in idsToDelete {
-            chatManager.deleteConversation(peerId: convId)
-        }
+    private var deleteChatTitle: String {
+        guard let c = pendingDeleteChat else { return "Delete chat?" }
+        return c.isGroup ? "Leave and delete \"\(c.peer.displayName)\"?" : "Delete chat with \(c.peer.displayName)?"
     }
 }
 

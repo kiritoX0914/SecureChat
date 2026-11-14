@@ -132,6 +132,15 @@ final class NetworkManager: ObservableObject {
 
     private var beacon: UDPBeacon?
 
+    /// Automatic discovery (periodic re-dial of known hosts, /24 subnet sweep,
+    /// UDP beacon). On the Mac this is off: it only listens for incoming
+    /// connections and scans when the user presses "Scan network".
+    #if targetEnvironment(macCatalyst)
+    static let autoDiscovery = false
+    #else
+    static let autoDiscovery = true
+    #endif
+
     // MARK: - Lifecycle
 
     func start(deviceId: String, displayName: String) {
@@ -164,7 +173,7 @@ final class NetworkManager: ObservableObject {
         let beacon = UDPBeacon(port: Self.beaconPort, deviceId: deviceId, queue: networkQueue)
         beacon.onHeard = { [weak self] host, remoteId in
             guard let self else { return }
-            guard remoteId != self.deviceId else { return }
+            guard remoteId != self.deviceId, Self.autoDiscovery else { return }
             if !self.isConnected(to: remoteId) {
                 self.connect(host: host, port: Self.defaultTCPPort, probe: true, manual: false, timeout: 3)
             }
@@ -173,6 +182,9 @@ final class NetworkManager: ObservableObject {
         self.beacon = beacon
 
         startTimer()
+        if !Self.autoDiscovery {
+            publishScan(running: false, text: "Auto scan is off on Mac · tap Scan to search")
+        }
     }
 
     /// Update the frames sent on every new link and as heartbeat.
@@ -202,6 +214,7 @@ final class NetworkManager: ObservableObject {
             for link in self.links.values where link.peerId != nil {
                 if let ping { self.sendFramed(ping, on: link.connection) }
             }
+            guard Self.autoDiscovery else { return }
             self.dialKnownHosts(jitter: false)
             self.startSweep(force: true)
         }
@@ -621,6 +634,9 @@ final class NetworkManager: ObservableObject {
             if let ping { sendFramed(ping, on: link.connection) }
         }
 
+        // Mac: no automatic probing at all – only heartbeats on existing links.
+        guard Self.autoDiscovery else { return }
+
         // 2. Re-dial known addresses of peers that are not connected.
         dialKnownHosts(jitter: true)
 
@@ -708,7 +724,8 @@ final class NetworkManager: ObservableObject {
         }
         if sweepQueue.isEmpty && sweepInFlight == 0 {
             let n = active.count
-            publishScan(running: false, text: n > 0 ? "\(n) peer(s) connected" : "No peers found yet – retrying")
+            let idle = Self.autoDiscovery ? "No peers found yet – retrying" : "No peers found · tap Scan to try again"
+            publishScan(running: false, text: n > 0 ? "\(n) peer(s) connected" : idle)
         }
     }
 

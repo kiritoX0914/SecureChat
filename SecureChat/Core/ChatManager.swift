@@ -984,11 +984,25 @@ final class ChatManager: ObservableObject {
     }
 
     /// Delete a conversation (for groups this also leaves the group).
+    /// Remove a chat from the list entirely: its messages and attachments, the
+    /// contact entry and its remembered address (so it isn't re-dialled). For a
+    /// group we leave it first. A peer that connects again later reappears.
     func deleteConversation(peerId convId: String) {
         guard var conv = conversations[convId] else { return }
-        if conv.isGroup { leaveGroup(convId) }
+        if conv.isGroup {
+            deletedGroups[convId] = conv.group?.version ?? 0
+            leaveGroup(convId)
+        }
         removeMessages(Set(conv.messages.map(\.id)), from: &conv)
         conversations.removeValue(forKey: convId)
+        if !conv.isGroup, let host = conv.peer.lastAddress {
+            let stillUsed = conversations.values.contains { !$0.isGroup && $0.peer.lastAddress == host }
+            if !stillUsed && knownHosts.contains(host) {
+                knownHosts.remove(host)
+                persistence.saveKnownHosts(Array(knownHosts))
+                networkManager.setKnownHosts(knownHosts)
+            }
+        }
         persist()
     }
 
@@ -1078,6 +1092,10 @@ final class ChatManager: ObservableObject {
             conversations[incoming.id] = conv
         } else {
             guard incoming.members.contains(localDeviceId) else { return }
+            if let deletedAt = deletedGroups[incoming.id] {
+                guard incoming.version > deletedAt + 1 else { return }
+                deletedGroups[incoming.id] = nil
+            }
             var conv = Conversation(id: incoming.id,
                                     peer: Peer(id: incoming.id, displayName: incoming.name, isOnline: false, lastSeen: Date()))
             conv.group = incoming
@@ -1086,8 +1104,16 @@ final class ChatManager: ObservableObject {
         persist()
     }
 
+    /// Groups the user deleted from the chat list, with the version at that
+    /// time, so stray messages don't resurrect them. Being re-added (a newer
+    /// group update that lists us) brings the group back.
+    private var deletedGroups: [String: Int] {
+        get { (UserDefaults.standard.dictionary(forKey: "sc.deletedGroups") as? [String: Int]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "sc.deletedGroups") }
+    }
+
     private func ensureGroupPlaceholder(_ gid: String, sender: String) {
-        guard conversations[gid] == nil else { return }
+        guard conversations[gid] == nil, deletedGroups[gid] == nil else { return }
         let names = [sender: conversations[sender]?.peer.displayName ?? "Member", localDeviceId: displayName]
         let info = GroupInfo(id: gid, name: "Group", members: [sender, localDeviceId], memberNames: names,
                              createdBy: sender, version: 0, updatedAt: .distantPast)
