@@ -89,10 +89,75 @@ final class LANDiscovery {
     /// `includePeerToPeer` lets Network.framework also try AWDL / peer-to-peer
     /// interfaces, which can help when devices aren't on the same L2 broadcast
     /// domain (for example some Internet Sharing setups).
-    static func makeTCPParameters() -> NWParameters {
-        let parameters = NWParameters.tcp
+    static func makeTCPParameters(connectTimeout: Int? = nil) -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        // Detect dead peers (phone locked / app suspended / cable pulled) quickly.
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 10
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 3
+        if let connectTimeout {
+            tcp.connectionTimeout = connectTimeout
+        }
+        let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.includePeerToPeer = true
         return parameters
+    }
+
+    /// Restart the listener / browser if iOS tore them down while the app was
+    /// suspended. Safe to call repeatedly.
+    func ensureRunning() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if self.listenerPhase != .ready && self.listenerPhase != .starting,
+               let id = self.advertisedDeviceId, let name = self.advertisedDisplayName {
+                print("[LANDiscovery] Restarting listener (phase: \(self.listenerPhase))")
+                self.startAdvertising(deviceId: id, displayName: name, preferFixedPort: true)
+            }
+            if self.browserPhase != .ready && self.browserPhase != .starting,
+               let own = self.ownDeviceId {
+                print("[LANDiscovery] Restarting browser")
+                self.startBrowsing(ownDeviceId: own)
+            }
+        }
+    }
+
+    /// One IPv4 interface with its netmask, used for subnet scanning.
+    struct IPv4Interface: Equatable {
+        let interface: String
+        let address: String
+        let addressValue: UInt32   // host byte order
+        let netmaskValue: UInt32   // host byte order
+    }
+
+    /// Enumerate up, non-loopback IPv4 interfaces with their netmask.
+    static func currentIPv4Interfaces() -> [IPv4Interface] {
+        var result: [IPv4Interface] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
+        defer { freeifaddrs(first) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let iface = ptr {
+            defer { ptr = iface.pointee.ifa_next }
+            let flags = Int32(iface.pointee.ifa_flags)
+            guard (flags & IFF_UP) != 0, (flags & IFF_LOOPBACK) == 0 else { continue }
+            guard let addr = iface.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard let maskPtr = iface.pointee.ifa_netmask else { continue }
+
+            let addrValue: UInt32 = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            let maskValue: UInt32 = maskPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
+            }
+            let name = String(cString: iface.pointee.ifa_name)
+            let text = "\((addrValue >> 24) & 0xFF).\((addrValue >> 16) & 0xFF).\((addrValue >> 8) & 0xFF).\(addrValue & 0xFF)"
+            guard addrValue != 0, (addrValue >> 24) != 127 else { continue }
+            result.append(IPv4Interface(interface: name, address: text, addressValue: addrValue, netmaskValue: maskValue))
+        }
+        return result
     }
 
     // MARK: - Advertising

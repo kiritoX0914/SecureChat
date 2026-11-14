@@ -8,6 +8,7 @@ import UIKit
 @main
 struct SecureChatApp: App {
     @StateObject private var chatManager: ChatManager
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let persistence = PersistenceManager()
@@ -24,7 +25,12 @@ struct SecureChatApp: App {
 
         // Load or default display name
         let displayName = persistence.loadDisplayName() ?? {
-            #if canImport(UIKit)
+            #if targetEnvironment(macCatalyst)
+            // UIDevice.current.name is a generic "iPad" on Catalyst
+            let host = ProcessInfo.processInfo.hostName
+            let short = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
+            return short.replacingOccurrences(of: "-", with: " ")
+            #elseif canImport(UIKit)
             return UIDevice.current.name
             #else
             return "User"
@@ -42,6 +48,19 @@ struct SecureChatApp: App {
         WindowGroup {
             ChatListView()
                 .environmentObject(chatManager)
+                #if targetEnvironment(macCatalyst)
+                .frame(minWidth: 800, minHeight: 560)
+                #endif
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active:
+                chatManager.appDidBecomeActive()
+            case .background:
+                chatManager.appDidEnterBackground()
+            default:
+                break
+            }
         }
     }
 }

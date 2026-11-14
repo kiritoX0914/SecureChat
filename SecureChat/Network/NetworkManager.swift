@@ -1,30 +1,31 @@
 // NetworkManager.swift
 // SecureChat – LAN End-to-End Encrypted Messenger
-// Manages peer connections and length-prefixed message transport over TCP
+// Manages peer connections and length-prefixed message transport over TCP.
+//
+// v1.2: Bonjour is only one of several discovery paths. Because TrollStore
+// installs cannot use multicast, every peer also
+//   • remembers the IPv4 addresses of peers it has talked to and re-dials them,
+//   • periodically sweeps its local /24 subnet(s) on the fixed port 47823,
+//   • sends a small UDP broadcast beacon (best effort) so others dial back,
+//   • heart-beats every live link and drops dead ones so the UI shows offline.
 
 import Foundation
 import Network
 import Combine
+import Darwin
 
-/// Central networking hub that owns the `LANDiscovery` layer and manages
-/// per-peer TCP connections with length-prefixed JSON framing.
-///
-/// ## Threading Model
-/// All networking work runs on a dedicated serial queue (`networkQueue`).
-/// Published properties are updated on `DispatchQueue.main` so SwiftUI
-/// views can bind to them directly.
 final class NetworkManager: ObservableObject {
 
     // MARK: - Published State
-
-    /// Currently-visible peers on the LAN, keyed by deviceId.
-    @Published var availablePeers: [String: PeerNetworkInfo] = [:]
 
     /// Lightweight value describing a discovered peer's display name and endpoint.
     struct PeerNetworkInfo: Sendable {
         let displayName: String
         let endpoint: NWEndpoint
     }
+
+    /// Currently-visible peers, keyed by deviceId.
+    @Published var availablePeers: [String: PeerNetworkInfo] = [:]
 
     /// Local IPv4 address of one up, non-loopback interface.
     struct LocalAddress: Identifiable, Equatable {
@@ -35,102 +36,121 @@ final class NetworkManager: ObservableObject {
 
     /// Preferred listener port (same as `LANDiscovery.defaultTCPPort`).
     static let defaultTCPPort: UInt16 = LANDiscovery.defaultTCPPort
+    /// UDP port used by the broadcast beacon.
+    static let beaconPort: UInt16 = 47824
 
-    /// Bound TCP port once the listener is ready.
     @Published var listeningPort: UInt16?
-
-    /// Current IPv4 addresses to show for manual connect.
     @Published var localIPv4Addresses: [LocalAddress] = []
-
-    /// `true` once the Bonjour/TCP listener is in the `.ready` state.
     @Published var listenerReady = false
-
-    /// `true` once the Bonjour browser is in the `.ready` state.
     @Published var browserReady = false
-
-    /// `true` if Network.framework reported a local-network permission denial
-    /// (`kDNSServiceErr_PolicyDenied` / `NoAuth`).
     @Published var isLocalNetworkDenied = false
-
-    /// Human-readable discovery status for the UI.
     @Published var discoveryStatus: String = "Starting…"
-
-    /// Last error from a manual IP connection attempt, if any.
     @Published var lastManualConnectError: String?
+    @Published var lastManualConnectSuccess: String?
+    /// Human readable status of the auto-reconnect scanner.
+    @Published var scanStatus: String = ""
+    @Published var isScanning = false
 
     // MARK: - Constants
 
-    /// Maximum incoming payload size: supports 50 MB files + Base64 expansion + envelope metadata.
-    static let maxPayloadLength: UInt32 = 150 * 1024 * 1024 // 150 MB
+    /// Maximum incoming frame size (v1.1 peers may still send big inline files).
+    static let maxPayloadLength: UInt32 = 150 * 1024 * 1024
 
-    // MARK: - Callbacks
+    /// A link that sends nothing for this long is considered dead.
+    static let deadLinkTimeout: TimeInterval = 25
+    static let tickInterval: TimeInterval = 5
 
-    /// Called when raw JSON payload bytes arrive from a connected peer.
-    /// Parameters: (rawJSONData, fromPeerId).
+    // MARK: - Callbacks (always invoked on the main queue)
+
+    /// Raw frame bytes from an identified peer. Parameters: (data, peerId).
     var onDataReceived: ((Data, String) -> Void)?
-
-    /// Called when a peer is discovered on the LAN. Parameters: (peerId, displayName).
+    /// A peer became known (name). Parameters: (peerId, displayName).
     var onPeerFound: ((String, String) -> Void)?
-
-    /// Called when a peer disappears from the LAN. Parameter: peerId.
+    /// Bonjour lost a peer.
     var onPeerLost: ((String) -> Void)?
-
-    /// Called when a TCP connection to a peer reaches the `.ready` state.
+    /// A link to the peer became the active link (send the full hello now).
     var onPeerConnected: ((String) -> Void)?
-
-    /// Called when a TCP connection to a peer is disconnected or cleaned up. Parameter: peerId.
+    /// The active link to a peer went away.
     var onPeerDisconnected: ((String) -> Void)?
+    /// We learned an IPv4 address for a peer. Parameters: (peerId, address).
+    var onPeerAddress: ((String, String) -> Void)?
 
     // MARK: - Private State
 
     private let discovery = LANDiscovery()
     private let networkQueue = DispatchQueue(label: "com.securechat.network")
-    private let stateLock = NSRecursiveLock()
+    private let snapshotLock = NSLock()
 
-    /// Our own device identity, set once via `start(deviceId:displayName:)`.
     private var deviceId: String = ""
     private var displayName: String = ""
 
-    /// Active TCP connections indexed by peer deviceId.
-    private var connections: [String: NWConnection] = [:]
+    /// First frame sent on every new link so the other side can identify us.
+    /// Set by ChatManager (thread-safe via snapshotLock).
+    private var identHello: Data?
+    private var pingFrame: Data?
 
-    /// Connections accepted from the listener whose peer identity is not yet
-    /// known. The first received `WireEnvelope` tells us the senderId.
-    private var pendingIncoming: Set<ObjectIdentifier> = []
+    private final class Link {
+        let connection: NWConnection
+        let outgoing: Bool
+        let isProbe: Bool
+        let isManual: Bool
+        var peerId: String?
+        var host: String?
+        var readyAt: Date?
+        var activatedAt: Date?
+        var lastReceived = Date()
+        var closed = false
 
-    /// Manual (Connect-by-IP) connections, mapped to a temporary id used only
-    /// so we can send the hello handshake before the peer's deviceId is known.
-    /// Temporary ids always start with `pending-`.
-    private var pendingManual: [ObjectIdentifier: String] = [:]
+        init(connection: NWConnection, outgoing: Bool, isProbe: Bool, isManual: Bool, host: String?) {
+            self.connection = connection
+            self.outgoing = outgoing
+            self.isProbe = isProbe
+            self.isManual = isManual
+            self.host = host
+        }
+    }
 
-    /// Reverse lookup so we can map an `NWConnection` back to its peerId
-    /// when we need to clean up on failure/cancel.
-    private var connectionToPeer: [ObjectIdentifier: String] = [:]
+    /// All links (networkQueue only).
+    private var links: [ObjectIdentifier: Link] = [:]
+    /// Active link per peer (networkQueue only).
+    private var active: [String: ObjectIdentifier] = [:]
+    /// Hosts with an in-flight probe (networkQueue only).
+    private var probingHosts: Set<String> = []
+
+    /// Thread-safe snapshots.
+    private var connectedPeerSnapshot: Set<String> = []
+    private var knownHosts: Set<String> = []
+
+    private var timer: DispatchSourceTimer?
+    private var tickCount = 0
+    private var sweepQueue: [String] = []
+    private var sweepInFlight = 0
+    private var lastSweep = Date.distantPast
+    private var started = false
+
+    private var beacon: UDPBeacon?
 
     // MARK: - Lifecycle
 
-    /// Start advertising our presence and browsing for peers.
-    ///
-    /// - Parameters:
-    ///   - deviceId: Our unique device UUID.
-    ///   - displayName: The user's chosen display name.
     func start(deviceId: String, displayName: String) {
         self.deviceId = deviceId
         self.displayName = displayName
+        guard !started else { return }
+        started = true
 
-        // Wire up discovery callbacks.
         discovery.onPeerDiscovered = { [weak self] peerId, name, endpoint in
             self?.handlePeerDiscovered(peerId: peerId, name: name, endpoint: endpoint)
         }
-
         discovery.onPeerLost = { [weak self] peerId in
-            self?.handlePeerLost(peerId: peerId)
+            DispatchQueue.main.async {
+                self?.availablePeers.removeValue(forKey: peerId)
+                self?.onPeerLost?(peerId)
+            }
         }
-
         discovery.onIncomingConnection = { [weak self] connection in
-            self?.handleIncomingConnection(connection)
+            guard let self else { return }
+            self.networkQueue.async { self.handleIncomingConnection(connection) }
         }
-
         discovery.onStatusChange = { [weak self] in
             self?.publishDiscoveryStatus()
         }
@@ -138,10 +158,61 @@ final class NetworkManager: ObservableObject {
         refreshLocalAddresses()
         discovery.startAdvertising(deviceId: deviceId, displayName: displayName)
         discovery.startBrowsing(ownDeviceId: deviceId)
+
+        let beacon = UDPBeacon(port: Self.beaconPort, deviceId: deviceId, queue: networkQueue)
+        beacon.onHeard = { [weak self] host, remoteId in
+            guard let self else { return }
+            guard remoteId != self.deviceId else { return }
+            if !self.isConnected(to: remoteId) {
+                self.connect(host: host, port: Self.defaultTCPPort, probe: true, manual: false, timeout: 3)
+            }
+        }
+        beacon.start()
+        self.beacon = beacon
+
+        startTimer()
     }
 
-    /// Re-read this device's IPv4 addresses (call when Settings appears, or
-    /// after a network change).
+    /// Update the frames sent on every new link and as heartbeat.
+    func setIdentity(helloFrame: Data?, pingFrame: Data?) {
+        snapshotLock.lock()
+        identHello = helloFrame
+        self.pingFrame = pingFrame
+        snapshotLock.unlock()
+    }
+
+    /// Addresses of peers we have talked to before (auto re-dial).
+    func setKnownHosts(_ hosts: Set<String>) {
+        snapshotLock.lock()
+        knownHosts = hosts
+        snapshotLock.unlock()
+    }
+
+    /// Called when the app returns to the foreground: restart listener /
+    /// browser if iOS killed them, verify links and re-dial immediately.
+    func wake() {
+        discovery.ensureRunning()
+        refreshLocalAddresses()
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            // Ping every link; dead ones error out and get removed.
+            let ping = self.currentPingFrame()
+            for link in self.links.values where link.peerId != nil {
+                if let ping { self.sendFramed(ping, on: link.connection) }
+            }
+            self.dialKnownHosts(jitter: false)
+            self.startSweep(force: true)
+        }
+    }
+
+    /// Manually trigger a re-dial + subnet sweep.
+    func scanNow() {
+        networkQueue.async { [weak self] in
+            self?.dialKnownHosts(jitter: false)
+            self?.startSweep(force: true)
+        }
+    }
+
     func refreshLocalAddresses() {
         let addresses = LANDiscovery.currentIPv4Addresses().map {
             LocalAddress(interface: $0.interface, address: $0.address)
@@ -151,92 +222,34 @@ final class NetworkManager: ObservableObject {
         }
     }
 
-    /// Open a TCP connection to a host:port typed by the user. The remote
-    /// peerId is unknown until the first `WireEnvelope` arrives; we send our
-    /// hello on a temporary id as soon as the socket is ready so both sides
-    /// can complete the handshake.
+    /// Open a TCP connection to a host:port typed by the user.
     func connectToAddress(host: String, port: UInt16) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, port > 0 else { return }
-
         DispatchQueue.main.async {
             self.lastManualConnectError = nil
+            self.lastManualConnectSuccess = nil
         }
-
-        networkQueue.async { [weak self] in
-            guard let self else { return }
-            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                DispatchQueue.main.async {
-                    self.lastManualConnectError = "Invalid port"
-                }
-                return
-            }
-            let connection = NWConnection(
-                host: NWEndpoint.Host(trimmed),
-                port: nwPort,
-                using: LANDiscovery.makeTCPParameters()
-            )
-            let tempId = "pending-" + UUID().uuidString
-            let connId = ObjectIdentifier(connection)
-
-            self.stateLock.lock()
-            self.pendingManual[connId] = tempId
-            self.connections[tempId] = connection
-            self.stateLock.unlock()
-
-            connection.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    print("[NetworkManager] Manual connection ready to \(trimmed):\(port)")
-                    self.receiveLoop(on: connection, peerId: nil)
-                    // Trigger ChatManager.sendHello(to: tempId) via the same path
-                    // used for discovered peers.
-                    DispatchQueue.main.async {
-                        self.onPeerConnected?(tempId)
-                    }
-                case .waiting(let error):
-                    print("[NetworkManager] Manual connection waiting: \(error)")
-                    DispatchQueue.main.async {
-                        self.lastManualConnectError = error.localizedDescription
-                    }
-                case .failed(let error):
-                    print("[NetworkManager] Manual connection failed: \(error)")
-                    DispatchQueue.main.async {
-                        self.lastManualConnectError = error.localizedDescription
-                    }
-                    self.cleanupConnection(connection)
-                case .cancelled:
-                    self.cleanupConnection(connection)
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: self.networkQueue)
-        }
+        connect(host: trimmed, port: port, probe: false, manual: true, timeout: 8)
     }
 
-    /// Update the advertised display name on Bonjour.
     func updateDisplayName(_ name: String) {
         self.displayName = name
         discovery.updateDisplayName(name)
     }
 
-    /// Tear down all connections and stop discovery.
     func stop() {
         discovery.stopAll()
-
-        stateLock.lock()
-        for (_, connection) in connections {
-            connection.cancel()
+        timer?.cancel()
+        timer = nil
+        beacon?.stop()
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            for link in self.links.values { link.connection.cancel() }
+            self.links.removeAll()
+            self.active.removeAll()
+            self.updateSnapshot()
         }
-        connections.removeAll()
-        connectionToPeer.removeAll()
-        pendingIncoming.removeAll()
-        pendingManual.removeAll()
-        stateLock.unlock()
-
         DispatchQueue.main.async {
             self.availablePeers.removeAll()
         }
@@ -244,416 +257,494 @@ final class NetworkManager: ObservableObject {
 
     // MARK: - Sending
 
-    /// Send raw data (already JSON-encoded) to a connected peer, framed with
-    /// a 4-byte big-endian length header.
-    ///
-    /// - Parameters:
-    ///   - data: The JSON payload bytes to send.
-    ///   - peerId: The destination peer's deviceId.
-    func send(_ data: Data, to peerId: String) {
+    /// Send a frame to a peer's active link. `completion` (if any) is called
+    /// on the network queue with `true` once the bytes were handed to TCP.
+    func send(_ data: Data, to peerId: String, completion: ((Bool) -> Void)? = nil) {
         networkQueue.async { [weak self] in
             guard let self else { return }
-            self.stateLock.lock()
-            let connection = self.connections[peerId]
-            self.stateLock.unlock()
-            guard let connection else {
-                print("[NetworkManager] Cannot send – no connection to \(peerId)")
+            guard let oid = self.active[peerId], let link = self.links[oid], !link.closed else {
+                completion?(false)
                 return
             }
-            self.sendFramed(data, on: connection)
+            self.sendFramed(data, on: link.connection, completion: completion)
         }
     }
 
-    /// Returns `true` if we hold a live connection for the given peer.
+    /// Returns `true` if we hold a live, identified link for the peer.
     func isConnected(to peerId: String) -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return connections[peerId] != nil
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return connectedPeerSnapshot.contains(peerId)
     }
 
-    // MARK: - Discovery Handling
+    var connectedPeerIds: Set<String> {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return connectedPeerSnapshot
+    }
+
+    // MARK: - Dialing
+
+    private func connect(host: String, port: UInt16, probe: Bool, manual: Bool, timeout: Int) {
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            let own = Set(LANDiscovery.currentIPv4Interfaces().map(\.address))
+            if own.contains(host) && !manual { return }
+            if probe {
+                if self.probingHosts.contains(host) { return }
+                // Already have a live link to that address?
+                if self.links.values.contains(where: { $0.host == host && !$0.closed && ($0.peerId != nil || $0.readyAt == nil) }) {
+                    return
+                }
+            }
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                if manual { DispatchQueue.main.async { self.lastManualConnectError = "Invalid port" } }
+                return
+            }
+            let connection = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: nwPort,
+                using: LANDiscovery.makeTCPParameters(connectTimeout: timeout)
+            )
+            let link = Link(connection: connection, outgoing: true, isProbe: probe, isManual: manual, host: host)
+            self.register(link)
+            if probe { self.probingHosts.insert(host) }
+
+            // Hard deadline for probes that never become ready.
+            if probe {
+                let deadline = Double(timeout) + 0.5
+                self.networkQueue.asyncAfter(deadline: .now() + deadline) { [weak self, weak link] in
+                    guard let self, let link, !link.closed else { return }
+                    if link.readyAt == nil { self.close(link) }
+                }
+            }
+            connection.start(queue: self.networkQueue)
+        }
+    }
 
     private func handlePeerDiscovered(peerId: String, name: String, endpoint: NWEndpoint) {
         DispatchQueue.main.async {
             self.availablePeers[peerId] = PeerNetworkInfo(displayName: name, endpoint: endpoint)
             self.onPeerFound?(peerId, name)
         }
-
-        // Initiate an outgoing connection if we don't already have one.
         networkQueue.async { [weak self] in
             guard let self else { return }
-            self.stateLock.lock()
-            let hasConnection = self.connections[peerId] != nil
-            self.stateLock.unlock()
-            if !hasConnection {
-                self.connectToPeer(peerId: peerId, endpoint: endpoint)
-            }
+            if self.active[peerId] != nil { return }
+            let connection = NWConnection(to: endpoint, using: LANDiscovery.makeTCPParameters(connectTimeout: 8))
+            let link = Link(connection: connection, outgoing: true, isProbe: false, isManual: false, host: nil)
+            self.register(link)
+            connection.start(queue: self.networkQueue)
         }
     }
 
-    private func handlePeerLost(peerId: String) {
-        networkQueue.async { [weak self] in
-            self?.removeConnection(for: peerId)
-        }
-
-        DispatchQueue.main.async {
-            self.availablePeers.removeValue(forKey: peerId)
-            self.onPeerLost?(peerId)
-        }
-    }
-
-    // MARK: - Outgoing Connections
-
-    /// Open a TCP connection to a discovered peer's endpoint.
-    private func connectToPeer(peerId: String, endpoint: NWEndpoint) {
-        let connection = NWConnection(to: endpoint, using: LANDiscovery.makeTCPParameters())
-        let connId = ObjectIdentifier(connection)
-        stateLock.lock()
-        connectionToPeer[connId] = peerId
-        stateLock.unlock()
-
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleConnectionStateChange(state, peerId: peerId, connection: connection)
-        }
-
-        connection.start(queue: networkQueue)
-    }
-
-    // MARK: - Incoming Connections
-
-    /// Accept an incoming connection from the NWListener. The remote peer's
-    /// identity is unknown until we receive the first `WireEnvelope`.
     private func handleIncomingConnection(_ connection: NWConnection) {
-        let connId = ObjectIdentifier(connection)
-        stateLock.lock()
-        pendingIncoming.insert(connId)
-        stateLock.unlock()
-
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                print("[NetworkManager] Incoming connection ready (pending identification)")
-                // Start receive loop with nil peerId; the first message will identify the peer.
-                self?.receiveLoop(on: connection, peerId: nil)
-
-            case .failed(let error):
-                print("[NetworkManager] Incoming connection failed: \(error)")
-                self?.cleanupConnection(connection)
-
-            case .cancelled:
-                self?.cleanupConnection(connection)
-
-            default:
-                break
-            }
-        }
-
+        let host = Self.ipv4Host(of: connection.endpoint)
+        let link = Link(connection: connection, outgoing: false, isProbe: false, isManual: false, host: host)
+        register(link)
         connection.start(queue: networkQueue)
+        // Drop incoming links that never identify themselves.
+        networkQueue.asyncAfter(deadline: .now() + 15) { [weak self, weak link] in
+            guard let self, let link, !link.closed else { return }
+            if link.peerId == nil { self.close(link) }
+        }
     }
 
-    // MARK: - Connection State Machine
+    // MARK: - Link state machine (networkQueue)
 
-    private func handleConnectionStateChange(
-        _ state: NWConnection.State,
-        peerId: String,
-        connection: NWConnection
-    ) {
+    private func register(_ link: Link) {
+        let oid = ObjectIdentifier(link.connection)
+        links[oid] = link
+        link.connection.stateUpdateHandler = { [weak self, weak link] state in
+            guard let self, let link else { return }
+            self.handleState(state, link: link)
+        }
+    }
+
+    private func handleState(_ state: NWConnection.State, link: Link) {
         switch state {
         case .ready:
-            print("[NetworkManager] Connected to \(peerId)")
-            stateLock.lock()
-            if let existing = connections[peerId], existing !== connection {
-                if deviceId < peerId {
-                    // We have smaller ID: prefer our outgoing connection
-                    print("[NetworkManager] Keeping outgoing connection to \(peerId), cancelling prior")
-                    existing.cancel()
-                    connections[peerId] = connection
-                    stateLock.unlock()
-                } else {
-                    // Remote has smaller ID: prefer their incoming connection
-                    print("[NetworkManager] Keeping incoming connection from \(peerId), dropping outgoing")
-                    stateLock.unlock()
-                    connection.cancel()
-                    return
-                }
-            } else {
-                connections[peerId] = connection
-                stateLock.unlock()
+            link.readyAt = Date()
+            link.lastReceived = Date()
+            if link.host == nil, let remote = link.connection.currentPath?.remoteEndpoint {
+                link.host = Self.ipv4Host(of: remote)
             }
-            receiveLoop(on: connection, peerId: peerId)
+            if let hello = currentHelloFrame() {
+                sendFramed(hello, on: link.connection)
+            }
+            receiveLoop(link)
+            if link.isProbe {
+                // A real SecureChat peer answers with its hello right away.
+                networkQueue.asyncAfter(deadline: .now() + 6) { [weak self, weak link] in
+                    guard let self, let link, !link.closed else { return }
+                    if link.peerId == nil { self.close(link) }
+                }
+            }
 
-            DispatchQueue.main.async {
-                self.onPeerConnected?(peerId)
+        case .waiting(let error):
+            if link.isManual {
+                DispatchQueue.main.async { self.lastManualConnectError = error.localizedDescription }
+            }
+            // Refused / unreachable – don't let Network.framework retry forever.
+            if link.isProbe || link.isManual {
+                close(link)
             }
 
         case .failed(let error):
-            print("[NetworkManager] Connection to \(peerId) failed: \(error)")
-            removeConnection(for: peerId)
+            if link.isManual {
+                DispatchQueue.main.async { self.lastManualConnectError = error.localizedDescription }
+            }
+            close(link)
 
         case .cancelled:
-            print("[NetworkManager] Connection to \(peerId) cancelled")
-            removeConnection(for: peerId)
-
-        case .waiting(let error):
-            print("[NetworkManager] Connection to \(peerId) waiting: \(error)")
+            close(link)
 
         default:
             break
         }
     }
 
-    // MARK: - Receive Loop (Length-Prefixed Framing & Chunked Accumulation)
+    private func close(_ link: Link) {
+        guard !link.closed else { return }
+        link.closed = true
+        let oid = ObjectIdentifier(link.connection)
+        links.removeValue(forKey: oid)
+        if let host = link.host, link.isProbe { probingHosts.remove(host) }
+        link.connection.stateUpdateHandler = nil
+        link.connection.cancel()
 
-    /// Continuously read length-prefixed messages from a connection.
-    ///
-    /// The framing protocol is:
-    /// ```
-    /// [4 bytes – big-endian UInt32 payload length][N bytes – JSON payload]
-    /// ```
-    ///
-    /// - Parameters:
-    ///   - connection: The TCP connection to read from.
-    ///   - peerId: The peer's deviceId, or `nil` for incoming connections whose
-    ///     identity hasn't been established yet.
-    private func receiveLoop(on connection: NWConnection, peerId: String?) {
-        // Step 1: Read the 4-byte length header.
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+        if sweepMembers.remove(oid) != nil {
+            sweepInFlight = max(0, sweepInFlight - 1)
+            pumpSweep()
+        }
 
+        if let peerId = link.peerId, active[peerId] == oid {
+            active.removeValue(forKey: peerId)
+            updateSnapshot()
+            DispatchQueue.main.async {
+                self.onPeerDisconnected?(peerId)
+            }
+        }
+    }
+
+    /// First envelope on a link tells us who is on the other end.
+    private func identify(_ link: Link, peerId: String, name: String) {
+        let oid = ObjectIdentifier(link.connection)
+        if link.isProbe, let host = link.host { probingHosts.remove(host) }
+        if sweepMembers.remove(oid) != nil {
+            sweepInFlight = max(0, sweepInFlight - 1)
+            pumpSweep()
+        }
+
+        if peerId == deviceId {
+            // We dialed ourselves (own address on another interface).
+            close(link)
+            return
+        }
+        link.peerId = peerId
+
+        let now = Date()
+        if let existingOid = active[peerId], existingOid != oid, let existing = links[existingOid] {
+            let existingFresh = now.timeIntervalSince(existing.activatedAt ?? .distantPast) < 3
+            var keepNew = true
+            if existingFresh {
+                // Simultaneous dial: both sides must keep the same TCP link.
+                // Rule: the link initiated by the smaller deviceId wins.
+                let winner = min(deviceId, peerId)
+                let newInitiator = link.outgoing ? deviceId : peerId
+                let oldInitiator = existing.outgoing ? deviceId : peerId
+                if newInitiator != oldInitiator {
+                    keepNew = (newInitiator == winner)
+                }
+            }
+            if keepNew {
+                print("[NetworkManager] Replacing link for \(peerId)")
+                active[peerId] = oid
+                existing.peerId = nil   // so close() does not report a disconnect
+                close(existing)
+            } else {
+                print("[NetworkManager] Keeping existing link for \(peerId), dropping new one")
+                link.peerId = nil
+                close(link)
+                return
+            }
+        } else {
+            active[peerId] = oid
+        }
+        link.activatedAt = now
+        updateSnapshot()
+
+        let host = link.host
+        let manual = link.isManual
+        DispatchQueue.main.async {
+            self.availablePeers[peerId] = PeerNetworkInfo(displayName: name, endpoint: link.connection.endpoint)
+            self.onPeerFound?(peerId, name)
+            if let host { self.onPeerAddress?(peerId, host) }
+            self.onPeerConnected?(peerId)
+            if manual {
+                self.lastManualConnectError = nil
+                self.lastManualConnectSuccess = "Connected to \(name)"
+            }
+        }
+    }
+
+    private func updateSnapshot() {
+        let set = Set(active.keys)
+        snapshotLock.lock()
+        connectedPeerSnapshot = set
+        snapshotLock.unlock()
+    }
+
+    private func currentHelloFrame() -> Data? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return identHello
+    }
+
+    private func currentPingFrame() -> Data? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pingFrame
+    }
+
+    // MARK: - Receive Loop
+
+    private func receiveLoop(_ link: Link) {
+        let connection = link.connection
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self, weak link] data, _, isComplete, error in
+            guard let self, let link, !link.closed else { return }
             if let error {
                 print("[NetworkManager] Receive header error: \(error)")
-                self.cleanupConnection(connection)
+                self.close(link)
                 return
             }
-
             guard let lengthData = data, lengthData.count == 4 else {
-                if isComplete {
-                    // Connection closed gracefully by the remote end.
-                    print("[NetworkManager] Connection closed by remote")
-                    self.cleanupConnection(connection)
-                }
+                if isComplete { self.close(link) }
                 return
             }
-
-            let length = lengthData.withUnsafeBytes { $0.load(as: UInt32.self) }
-            let payloadLength = UInt32(bigEndian: length)
-
+            let b = [UInt8](lengthData)
+            let payloadLength = (UInt32(b[0]) << 24) | (UInt32(b[1]) << 16) | (UInt32(b[2]) << 8) | UInt32(b[3])
             guard payloadLength > 0, payloadLength <= Self.maxPayloadLength else {
-                // Reject payloads exceeding maximum allowed size
-                print("[NetworkManager] Invalid payload length: \(payloadLength) (max: \(Self.maxPayloadLength))")
-                self.cleanupConnection(connection)
+                print("[NetworkManager] Invalid payload length: \(payloadLength)")
+                self.close(link)
                 return
             }
-
-            // Step 2: Read the payload using chunked accumulation.
-            self.receivePayload(ofLength: Int(payloadLength), on: connection) { [weak self] payload in
-                guard let self, let payload else {
-                    self?.cleanupConnection(connection)
+            let len = Int(payloadLength)
+            connection.receive(minimumIncompleteLength: len, maximumLength: len) { [weak self, weak link] payload, _, isComplete, error in
+                guard let self, let link, !link.closed else { return }
+                if let error {
+                    print("[NetworkManager] Receive payload error: \(error)")
+                    self.close(link)
                     return
                 }
-
-                // Step 3: Process the payload and continue the loop.
-                self.handleReceivedData(payload, from: peerId, on: connection)
-                self.receiveLoop(on: connection, peerId: peerId)
+                guard let payload, payload.count == len else {
+                    print("[NetworkManager] Short payload / closed")
+                    self.close(link)
+                    return
+                }
+                self.handleFrame(payload, on: link)
+                if !link.closed && !isComplete {
+                    self.receiveLoop(link)
+                } else if isComplete {
+                    self.close(link)
+                }
             }
         }
     }
 
-    /// Accumulate payload bytes in chunks (up to 64 KB) to support large payloads without socket buffer truncation.
-    private func receivePayload(
-        ofLength length: Int,
-        accumulating: Data = Data(),
-        on connection: NWConnection,
-        completion: @escaping (Data?) -> Void
-    ) {
-        let remaining = length - accumulating.count
-        let chunkSize = min(remaining, 65536)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: chunkSize) { [weak self] data, _, isComplete, error in
-            if let error {
-                print("[NetworkManager] Receive chunk error: \(error)")
-                completion(nil)
-                return
-            }
-            guard let chunk = data, !chunk.isEmpty else {
-                if isComplete {
-                    completion(nil)
-                }
-                return
-            }
-            var buffer = accumulating
-            buffer.append(chunk)
-            if buffer.count == length {
-                completion(buffer)
-            } else if buffer.count < length {
-                if isComplete {
-                    print("[NetworkManager] Connection closed before full payload received (\(buffer.count)/\(length))")
-                    completion(nil)
-                } else {
-                    self?.receivePayload(ofLength: length, accumulating: buffer, on: connection, completion: completion)
-                }
-            } else {
-                print("[NetworkManager] Received excess data (\(buffer.count) > \(length))")
-                completion(nil)
-            }
-        }
-    }
+    private func handleFrame(_ data: Data, on link: Link) {
+        link.lastReceived = Date()
 
-    // MARK: - Message Handling
-
-    /// Process a received JSON payload. For pending incoming connections the
-    /// first message is used to establish the peer's identity (via `WireEnvelope.senderId`).
-    ///
-    /// After the first message identifies the peer, subsequent calls with `peerId == nil`
-    /// resolve the identity via the `connectionToPeer` map, avoiding repeated envelope decoding.
-    private func handleReceivedData(_ data: Data, from peerId: String?, on connection: NWConnection) {
-        // Fast path: peerId already known by the receive loop.
-        if let peerId {
+        if let peerId = link.peerId {
             DispatchQueue.main.async {
                 self.onDataReceived?(data, peerId)
             }
             return
         }
 
-        // The receive loop was started with peerId=nil (incoming connection).
-        // Check if we've already identified this connection from a prior message.
-        let connId = ObjectIdentifier(connection)
-        stateLock.lock()
-        let resolvedPeerId = connectionToPeer[connId]
-        stateLock.unlock()
-        if let resolvedPeerId {
+        // Unidentified link – the first frame must be a JSON envelope.
+        guard data.first == UInt8(ascii: "{"),
+              let envelope = try? JSONDecoder().decode(WireEnvelope.self, from: data) else {
+            print("[NetworkManager] Unidentified link sent a non-envelope frame; closing")
+            close(link)
+            return
+        }
+        identify(link, peerId: envelope.senderId, name: envelope.senderName)
+        if let peerId = link.peerId, !link.closed {
             DispatchQueue.main.async {
-                self.onDataReceived?(data, resolvedPeerId)
-            }
-            return
-        }
-
-        // First message on an unidentified incoming connection – extract senderId.
-        guard let envelope = try? JSONDecoder().decode(WireEnvelope.self, from: data) else {
-            print("[NetworkManager] Failed to decode WireEnvelope from incoming connection")
-            connection.cancel()
-            return
-        }
-
-        let remotePeerId = envelope.senderId
-
-        stateLock.lock()
-        pendingIncoming.remove(connId)
-        let tempId = pendingManual.removeValue(forKey: connId)
-        // A manual connection already sent hello under tempId; don't send it twice.
-        let alreadySentHello = tempId != nil
-        if let tempId {
-            connections.removeValue(forKey: tempId)
-        }
-
-        // Duplicate-connection resolution: when both sides connect simultaneously,
-        // the peer with the lexicographically *smaller* deviceId keeps the connection
-        // it *initiated* (the outgoing one). The other side keeps its incoming.
-        if let existing = connections[remotePeerId], existing !== connection {
-            if deviceId < remotePeerId {
-                // We have the smaller ID → keep our outgoing, drop this incoming.
-                print("[NetworkManager] Dropping duplicate incoming from \(remotePeerId) (we keep outgoing)")
-                stateLock.unlock()
-                connection.cancel()
-                return
-            } else {
-                // They have the smaller ID → they keep their outgoing (our incoming).
-                print("[NetworkManager] Replacing outgoing with incoming for \(remotePeerId)")
-                existing.cancel()
+                self.onDataReceived?(data, peerId)
             }
         }
-
-        // Register the connection.
-        connections[remotePeerId] = connection
-        connectionToPeer[connId] = remotePeerId
-        stateLock.unlock()
-
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleConnectionStateChange(state, peerId: remotePeerId, connection: connection)
-        }
-
-        print("[NetworkManager] Identified peer: \(remotePeerId) (name: \(envelope.senderName))")
-
-        DispatchQueue.main.async {
-            self.availablePeers[remotePeerId] = PeerNetworkInfo(
-                displayName: envelope.senderName,
-                endpoint: connection.endpoint
-            )
-            self.onPeerFound?(remotePeerId, envelope.senderName)
-            // Incoming listener connections have not sent hello yet.
-            if !alreadySentHello {
-                self.onPeerConnected?(remotePeerId)
-            }
-            self.onDataReceived?(data, remotePeerId)
-        }
-
-        // The calling receiveLoop continues with peerId=nil. Subsequent messages
-        // will hit the `connectionToPeer` lookup above and be routed correctly
-        // without needing to re-decode the envelope for identity.
     }
 
     // MARK: - Framing
 
-    /// Send data on a connection with a 4-byte big-endian length prefix.
-    private func sendFramed(_ data: Data, on connection: NWConnection) {
+    private func sendFramed(_ data: Data, on connection: NWConnection, completion: ((Bool) -> Void)? = nil) {
         var length = UInt32(data.count).bigEndian
         var frame = Data(bytes: &length, count: 4)
         frame.append(data)
-
         connection.send(content: frame, completion: .contentProcessed { error in
             if let error {
                 print("[NetworkManager] Send error: \(error)")
             }
+            completion?(error == nil)
         })
     }
 
-    // MARK: - Connection Cleanup
+    // MARK: - Heartbeat / auto reconnect (networkQueue)
 
-    /// Remove a known peer's connection and notify the caller.
-    private func removeConnection(for peerId: String) {
-        stateLock.lock()
-        let connection = connections.removeValue(forKey: peerId)
-        if let connection {
-            let connId = ObjectIdentifier(connection)
-            connectionToPeer.removeValue(forKey: connId)
+    private func startTimer() {
+        let t = DispatchSource.makeTimerSource(queue: networkQueue)
+        t.schedule(deadline: .now() + 1.5, repeating: Self.tickInterval, leeway: .milliseconds(500))
+        t.setEventHandler { [weak self] in self?.tick() }
+        t.resume()
+        timer = t
+    }
+
+    private func tick() {
+        tickCount += 1
+        let now = Date()
+
+        // 1. Heartbeat + dead link detection.
+        let ping = currentPingFrame()
+        for link in Array(links.values) where !link.closed && link.peerId != nil {
+            if now.timeIntervalSince(link.lastReceived) > Self.deadLinkTimeout {
+                print("[NetworkManager] Link to \(link.peerId ?? "?") silent for \(Int(now.timeIntervalSince(link.lastReceived)))s – dropping")
+                close(link)
+                continue
+            }
+            if let ping { sendFramed(ping, on: link.connection) }
         }
-        stateLock.unlock()
 
-        if let connection {
-            connection.cancel()
-            DispatchQueue.main.async {
-                self.onPeerDisconnected?(peerId)
+        // 2. Re-dial known addresses of peers that are not connected.
+        dialKnownHosts(jitter: true)
+
+        // 3. Subnet sweep: every 15 s while nobody is online, else every 60 s.
+        let interval: TimeInterval = active.isEmpty ? 15 : 60
+        if now.timeIntervalSince(lastSweep) >= interval {
+            startSweep(force: false)
+        }
+
+        // 4. UDP beacon (best effort).
+        beacon?.announce()
+    }
+
+    private func dialKnownHosts(jitter: Bool) {
+        snapshotLock.lock()
+        let hosts = knownHosts
+        snapshotLock.unlock()
+        let connectedHosts = Set(links.values.compactMap { $0.peerId != nil ? $0.host : nil })
+        for host in hosts where !connectedHosts.contains(host) && !probingHosts.contains(host) {
+            let delay = jitter ? Double.random(in: 0...1.5) : 0
+            networkQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.connect(host: host, port: Self.defaultTCPPort, probe: true, manual: false, timeout: 3)
             }
         }
     }
 
-    /// Clean up a connection identified only by its object identity (used for
-    /// pending incoming connections whose peerId may not be known yet).
-    private func cleanupConnection(_ connection: NWConnection) {
-        let connId = ObjectIdentifier(connection)
-        stateLock.lock()
-        pendingIncoming.remove(connId)
-        let tempId = pendingManual.removeValue(forKey: connId)
-        let peerId = connectionToPeer.removeValue(forKey: connId)
-        if let peerId {
-            connections.removeValue(forKey: peerId)
-        }
-        if let tempId {
-            connections.removeValue(forKey: tempId)
-        }
-        stateLock.unlock()
+    private var sweepMembers: Set<ObjectIdentifier> = []
+    private static let sweepConcurrency = 24
 
-        connection.cancel()
-        // Don't surface temporary manual-connect ids to the UI.
-        if let peerId, !peerId.hasPrefix("pending-") {
-            DispatchQueue.main.async {
-                self.onPeerDisconnected?(peerId)
+    private func startSweep(force: Bool) {
+        if !force && !sweepQueue.isEmpty { return }
+        lastSweep = Date()
+        let interfaces = LANDiscovery.currentIPv4Interfaces().filter { Self.isScannableInterface($0.interface) }
+        let own = Set(LANDiscovery.currentIPv4Interfaces().map(\.addressValue))
+        let connectedHosts = Set(links.values.compactMap { $0.peerId != nil ? $0.host : nil })
+
+        var targets: [String] = []
+        var seen = Set<String>()
+        for iface in interfaces {
+            var mask = iface.netmaskValue
+            // Cap large subnets to the /24 we live in.
+            if mask < 0xFFFF_FF00 { mask = 0xFFFF_FF00 }
+            let network = iface.addressValue & mask
+            let broadcast = network | ~mask
+            guard broadcast > network + 1 else { continue }
+            var host = network + 1
+            while host < broadcast {
+                if !own.contains(host) {
+                    let text = Self.ipv4String(host)
+                    if !connectedHosts.contains(text) && !seen.contains(text) {
+                        seen.insert(text)
+                        targets.append(text)
+                    }
+                }
+                host += 1
             }
+        }
+        guard !targets.isEmpty else {
+            publishScan(running: false, text: "No scannable network")
+            return
+        }
+        sweepQueue = targets
+        publishScan(running: true, text: "Scanning \(targets.count) addresses…")
+        pumpSweep()
+    }
+
+    private func pumpSweep() {
+        while sweepInFlight < Self.sweepConcurrency, !sweepQueue.isEmpty {
+            let host = sweepQueue.removeFirst()
+            if probingHosts.contains(host) { continue }
+            guard let port = NWEndpoint.Port(rawValue: Self.defaultTCPPort) else { return }
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: port,
+                                          using: LANDiscovery.makeTCPParameters(connectTimeout: 2))
+            let link = Link(connection: connection, outgoing: true, isProbe: true, isManual: false, host: host)
+            register(link)
+            probingHosts.insert(host)
+            let oid = ObjectIdentifier(connection)
+            sweepMembers.insert(oid)
+            sweepInFlight += 1
+            networkQueue.asyncAfter(deadline: .now() + 2.5) { [weak self, weak link] in
+                guard let self, let link, !link.closed else { return }
+                if link.readyAt == nil { self.close(link) }
+            }
+            connection.start(queue: networkQueue)
+        }
+        if sweepQueue.isEmpty && sweepInFlight == 0 {
+            let n = active.count
+            publishScan(running: false, text: n > 0 ? "\(n) peer(s) connected" : "No peers found yet – retrying")
+        }
+    }
+
+    private func publishScan(running: Bool, text: String) {
+        DispatchQueue.main.async {
+            self.isScanning = running
+            self.scanStatus = text
+        }
+    }
+
+    private static func isScannableInterface(_ name: String) -> Bool {
+        // Wi-Fi / Ethernet / Internet Sharing bridges / personal hotspot.
+        return name.hasPrefix("en") || name.hasPrefix("bridge") || name.hasPrefix("ap") || name.hasPrefix("eth")
+    }
+
+    static func ipv4String(_ v: UInt32) -> String {
+        "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
+    }
+
+    /// Extract a dotted IPv4 string from an endpoint (handles IPv4-mapped IPv6).
+    static func ipv4Host(of endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        switch host {
+        case .ipv4(let addr):
+            let b = [UInt8](addr.rawValue)
+            guard b.count == 4 else { return nil }
+            return "\(b[0]).\(b[1]).\(b[2]).\(b[3])"
+        case .ipv6(let addr):
+            let b = [UInt8](addr.rawValue)
+            guard b.count == 16, b[0..<10].allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF else { return nil }
+            return "\(b[12]).\(b[13]).\(b[14]).\(b[15])"
+        case .name(let name, _):
+            let parts = name.split(separator: ".")
+            if parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) { return name }
+            return nil
+        @unknown default:
+            return nil
         }
     }
 
     // MARK: - Discovery Status
 
-    /// Copy listener/browser state onto the main-thread published properties.
     private func publishDiscoveryStatus() {
         let port = discovery.listeningPort
         let listenerPhase = discovery.listenerPhase
@@ -665,7 +756,7 @@ final class NetworkManager: ObservableObject {
 
         let status: String
         if denied {
-            status = "Local network permission denied"
+            status = "Bonjour blocked · direct scan active"
         } else {
             var parts: [String] = []
             parts.append(Self.phrase(for: listenerPhase, role: "Listener"))
@@ -693,7 +784,116 @@ final class NetworkManager: ObservableObject {
         case .ready: return "\(role) ready"
         case .waiting(let msg): return "\(role) waiting (\(msg))"
         case .failed(let msg): return "\(role) failed (\(msg))"
-        case .permissionDenied: return "Local network permission denied"
+        case .permissionDenied: return "\(role) blocked"
+        }
+    }
+}
+
+// MARK: - UDP broadcast beacon (best effort)
+
+/// Sends "SCv2|<deviceId>" to the subnet broadcast address of every LAN
+/// interface and listens for other peers' beacons. Whoever hears a beacon
+/// dials the sender over TCP. Works on macOS; on iOS it only works if the
+/// system lets the app broadcast (TrollStore installs may be blocked), in
+/// which case the TCP subnet sweep still finds peers.
+final class UDPBeacon {
+    var onHeard: ((String, String) -> Void)?
+
+    private let port: UInt16
+    private let deviceId: String
+    private let queue: DispatchQueue
+    private var fd: Int32 = -1
+    private var source: DispatchSourceRead?
+
+    init(port: UInt16, deviceId: String, queue: DispatchQueue) {
+        self.port = port
+        self.deviceId = deviceId
+        self.queue = queue
+    }
+
+    func start() {
+        let s = socket(AF_INET, SOCK_DGRAM, Int32(IPPROTO_UDP))
+        guard s >= 0 else { print("[UDPBeacon] socket() failed"); return }
+        var yes: Int32 = 1
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(s, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
+        let flags = fcntl(s, F_GETFL, 0)
+        _ = fcntl(s, F_SETFL, flags | O_NONBLOCK)
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr = in_addr(s_addr: INADDR_ANY)
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bound != 0 {
+            print("[UDPBeacon] bind failed: \(errno)")
+            Darwin.close(s)
+            return
+        }
+        fd = s
+        let src = DispatchSource.makeReadSource(fileDescriptor: s, queue: queue)
+        src.setEventHandler { [weak self] in self?.readAvailable() }
+        src.setCancelHandler { Darwin.close(s) }
+        src.resume()
+        source = src
+    }
+
+    func stop() {
+        source?.cancel()
+        source = nil
+        fd = -1
+    }
+
+    func announce() {
+        guard fd >= 0 else { return }
+        let message = Array("SCv2|\(deviceId)".utf8)
+        var targets: [UInt32] = [0xFFFF_FFFF]
+        for iface in LANDiscovery.currentIPv4Interfaces() {
+            let n = iface.interface
+            guard n.hasPrefix("en") || n.hasPrefix("bridge") || n.hasPrefix("ap") else { continue }
+            let bcast = (iface.addressValue & iface.netmaskValue) | ~iface.netmaskValue
+            targets.append(bcast)
+        }
+        for target in Set(targets) {
+            var dest = sockaddr_in()
+            dest.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            dest.sin_family = sa_family_t(AF_INET)
+            dest.sin_port = port.bigEndian
+            dest.sin_addr = in_addr(s_addr: target.bigEndian)
+            _ = message.withUnsafeBytes { buf in
+                withUnsafePointer(to: &dest) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        sendto(fd, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+        }
+    }
+
+    private func readAvailable() {
+        var buffer = [UInt8](repeating: 0, count: 512)
+        while true {
+            var from = sockaddr_in()
+            var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n = buffer.withUnsafeMutableBytes { buf in
+                withUnsafeMutablePointer(to: &from) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        recvfrom(fd, buf.baseAddress, buf.count, 0, $0, &fromLen)
+                    }
+                }
+            }
+            if n <= 0 { return }
+            guard let text = String(bytes: buffer[0..<n], encoding: .utf8), text.hasPrefix("SCv2|") else { continue }
+            let remoteId = String(text.dropFirst(5))
+            let ip = UInt32(bigEndian: from.sin_addr.s_addr)
+            let host = NetworkManager.ipv4String(ip)
+            onHeard?(host, remoteId)
         }
     }
 }

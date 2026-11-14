@@ -8,7 +8,7 @@ import Foundation
 
 /// A discovered peer on the local network
 struct Peer: Identifiable, Codable, Hashable, Sendable {
-    let id: String                    // Unique device UUID
+    let id: String                    // Unique device UUID (or group id for group conversations)
     var displayName: String
     var isOnline: Bool = false
     var lastSeen: Date = Date()
@@ -16,6 +16,11 @@ struct Peer: Identifiable, Codable, Hashable, Sendable {
     // Crypto identity (populated after hello exchange)
     var identityDHKeyData: Data?      // Curve25519 DH public key
     var identitySigningKeyData: Data? // Ed25519 signing public key
+
+    /// Avatar chosen by the peer themselves (broadcast via encrypted profile update).
+    var avatarData: Data?
+    /// Last IPv4 address we reached this peer at (used for auto-reconnect).
+    var lastAddress: String?
 
     var hasIdentity: Bool {
         identityDHKeyData != nil && identitySigningKeyData != nil
@@ -27,7 +32,39 @@ struct Peer: Identifiable, Codable, Hashable, Sendable {
         return key.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
     }
 
-    static func == (lhs: Peer, rhs: Peer) -> Bool { lhs.id == rhs.id }
+    init(id: String, displayName: String, isOnline: Bool = false, lastSeen: Date = Date(),
+         identityDHKeyData: Data? = nil, identitySigningKeyData: Data? = nil,
+         avatarData: Data? = nil, lastAddress: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.isOnline = isOnline
+        self.lastSeen = lastSeen
+        self.identityDHKeyData = identityDHKeyData
+        self.identitySigningKeyData = identitySigningKeyData
+        self.avatarData = avatarData
+        self.lastAddress = lastAddress
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, isOnline, lastSeen, identityDHKeyData, identitySigningKeyData, avatarData, lastAddress
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? "Unknown"
+        isOnline = try c.decodeIfPresent(Bool.self, forKey: .isOnline) ?? false
+        lastSeen = try c.decodeIfPresent(Date.self, forKey: .lastSeen) ?? Date()
+        identityDHKeyData = try c.decodeIfPresent(Data.self, forKey: .identityDHKeyData)
+        identitySigningKeyData = try c.decodeIfPresent(Data.self, forKey: .identitySigningKeyData)
+        avatarData = try c.decodeIfPresent(Data.self, forKey: .avatarData)
+        lastAddress = try c.decodeIfPresent(String.self, forKey: .lastAddress)
+    }
+
+    static func == (lhs: Peer, rhs: Peer) -> Bool {
+        lhs.id == rhs.id && lhs.displayName == rhs.displayName && lhs.isOnline == rhs.isOnline
+            && lhs.avatarData == rhs.avatarData && lhs.identityDHKeyData == rhs.identityDHKeyData
+    }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
@@ -41,7 +78,21 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     let timestamp: Date
     var status: Status
     let contentType: ContentType
-    let attachment: Attachment?
+    var attachment: Attachment?
+
+    // v1.2 additions (all optional so older peers stay compatible)
+    /// Message this one replies to.
+    var replyToId: UUID?
+    /// Short snippet of the replied message (so the quote renders even if the original was deleted).
+    var replyToText: String?
+    /// Sender display name of the replied message.
+    var replyToSender: String?
+    /// Group id if this is a group message.
+    var groupId: String?
+    /// Sender display name (used in group chats).
+    var senderName: String?
+    /// Local only: recipients that have not acknowledged this outgoing message yet.
+    var pendingRecipients: [String]?
 
     enum Status: Int, Codable, Equatable, Comparable, Sendable {
         case sending  = 0
@@ -58,7 +109,11 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     enum ContentType: Int, Codable, Equatable, Sendable {
         case text  = 0
         case image = 1
-        case file  = 2
+        case file  = 2   // includes video (mimeType video/*)
+    }
+
+    var isVideo: Bool {
+        contentType == .file && (attachment?.isVideo ?? false)
     }
 
     // MARK: Init helpers
@@ -84,6 +139,7 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, senderId, recipientId, text, timestamp, status, contentType, attachment
+        case replyToId, replyToText, replyToSender, groupId, senderName, pendingRecipients
     }
 
     init(from decoder: Decoder) throws {
@@ -91,26 +147,102 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         id          = try c.decode(UUID.self, forKey: .id)
         senderId    = try c.decode(String.self, forKey: .senderId)
         recipientId = try c.decode(String.self, forKey: .recipientId)
-        text        = try c.decode(String.self, forKey: .text)
+        text        = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         timestamp   = try c.decode(Date.self, forKey: .timestamp)
-        status      = try c.decode(Status.self, forKey: .status)
+        status      = try c.decodeIfPresent(Status.self, forKey: .status) ?? .sent
         contentType = try c.decodeIfPresent(ContentType.self, forKey: .contentType) ?? .text
         attachment  = try c.decodeIfPresent(Attachment.self, forKey: .attachment)
+        replyToId   = try c.decodeIfPresent(UUID.self, forKey: .replyToId)
+        replyToText = try c.decodeIfPresent(String.self, forKey: .replyToText)
+        replyToSender = try c.decodeIfPresent(String.self, forKey: .replyToSender)
+        groupId     = try c.decodeIfPresent(String.self, forKey: .groupId)
+        senderName  = try c.decodeIfPresent(String.self, forKey: .senderName)
+        pendingRecipients = try c.decodeIfPresent([String].self, forKey: .pendingRecipients)
+    }
+
+    /// Text used for previews / reply quotes.
+    var previewText: String {
+        switch contentType {
+        case .text: return text
+        case .image: return "📷 Photo"
+        case .file:
+            if isVideo { return "🎬 Video" }
+            return "📎 " + (attachment?.filename ?? "File")
+        }
     }
 }
 
 // MARK: - Attachment
 
 struct Attachment: Codable, Equatable, Sendable {
-    let filename: String
-    let mimeType: String
-    let data: Data             // Binary content (compressed image or file bytes)
-    let fileSize: Int64
+    var filename: String
+    var mimeType: String
+    /// Inline bytes. Only used on the wire for small images (and by v1.1 peers).
+    /// Locally we keep bytes on disk (see `localFile`) and drop this.
+    var data: Data?
+    var fileSize: Int64
 
-    // Image-specific (nil for files)
-    let width: Int?
-    let height: Int?
-    let thumbnailData: Data?   // Small JPEG preview (~100px)
+    // Image / video specific
+    var width: Int?
+    var height: Int?
+    var thumbnailData: Data?   // Small JPEG preview
+    var duration: Double?      // Video duration in seconds
+
+    // v1.2 chunked transfer
+    /// Path relative to the attachments directory, e.g. "<messageId>/file.pdf".
+    var localFile: String?
+    /// Chunked transfer id (== message id).
+    var transferId: UUID?
+    /// Per-file AES-256-GCM key, delivered inside the E2E-encrypted message. Never persisted.
+    var fileKey: Data?
+    var chunkSize: Int?
+    var chunkCount: Int?
+    /// Local only: true once the bytes are fully on disk.
+    var isComplete: Bool?
+
+    init(filename: String, mimeType: String, data: Data?, fileSize: Int64,
+         width: Int? = nil, height: Int? = nil, thumbnailData: Data? = nil) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.data = data
+        self.fileSize = fileSize
+        self.width = width
+        self.height = height
+        self.thumbnailData = thumbnailData
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case filename, mimeType, data, fileSize, width, height, thumbnailData, duration
+        case localFile, transferId, fileKey, chunkSize, chunkCount, isComplete
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        filename = try c.decodeIfPresent(String.self, forKey: .filename) ?? "file"
+        mimeType = try c.decodeIfPresent(String.self, forKey: .mimeType) ?? "application/octet-stream"
+        data = try c.decodeIfPresent(Data.self, forKey: .data)
+        fileSize = try c.decodeIfPresent(Int64.self, forKey: .fileSize) ?? Int64(data?.count ?? 0)
+        width = try c.decodeIfPresent(Int.self, forKey: .width)
+        height = try c.decodeIfPresent(Int.self, forKey: .height)
+        thumbnailData = try c.decodeIfPresent(Data.self, forKey: .thumbnailData)
+        duration = try c.decodeIfPresent(Double.self, forKey: .duration)
+        localFile = try c.decodeIfPresent(String.self, forKey: .localFile)
+        transferId = try c.decodeIfPresent(UUID.self, forKey: .transferId)
+        fileKey = try c.decodeIfPresent(Data.self, forKey: .fileKey)
+        chunkSize = try c.decodeIfPresent(Int.self, forKey: .chunkSize)
+        chunkCount = try c.decodeIfPresent(Int.self, forKey: .chunkCount)
+        isComplete = try c.decodeIfPresent(Bool.self, forKey: .isComplete)
+    }
+
+    var isVideo: Bool { mimeType.lowercased().hasPrefix("video/") }
+    var isImage: Bool { mimeType.lowercased().hasPrefix("image/") }
+
+    /// Bytes available locally (inline or completed file).
+    var isAvailable: Bool {
+        if data != nil { return true }
+        if localFile != nil && (isComplete ?? true) { return true }
+        return false
+    }
 
     /// Human-readable file size string
     var formattedSize: String {
@@ -130,16 +262,31 @@ struct Attachment: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Group
+
+struct GroupInfo: Codable, Equatable, Sendable {
+    let id: String               // "group-<UUID>"
+    var name: String
+    var members: [String]        // device ids, including the creator
+    var memberNames: [String: String]
+    var createdBy: String
+    var version: Int
+    var updatedAt: Date
+    var avatarData: Data?
+}
+
 // MARK: - Conversation
 
 struct Conversation: Identifiable, Equatable, Sendable {
-    let id: String                // == peer.id
+    let id: String                // == peer.id, or group id
     var peer: Peer
     var messages: [ChatMessage] = []
     var unreadCount: Int = 0
     var isTyping: Bool = false
     var preKeyBundle: PreKeyBundlePayload?
+    var group: GroupInfo?
 
+    var isGroup: Bool { group != nil }
     var lastMessage: ChatMessage? { messages.last }
 
     static func == (lhs: Conversation, rhs: Conversation) -> Bool {
@@ -147,12 +294,14 @@ struct Conversation: Identifiable, Equatable, Sendable {
         lhs.peer == rhs.peer &&
         lhs.messages == rhs.messages &&
         lhs.unreadCount == rhs.unreadCount &&
-        lhs.isTyping == rhs.isTyping
+        lhs.isTyping == rhs.isTyping &&
+        lhs.group == rhs.group
     }
 }
 
 // MARK: - Wire Protocol
 // Framing: [4-byte big-endian UInt32 length][JSON-encoded WireEnvelope]
+// v1.2 also uses binary frames for file chunks: payload starts with 0x01 (see FileChunkFrame).
 
 struct WireEnvelope: Codable, Sendable {
     let type: MessageType
@@ -166,6 +315,7 @@ struct WireEnvelope: Codable, Sendable {
         case message        = 2  // payload → EncryptedMessagePayload
         case ack            = 3  // payload → AckPayload
         case typing         = 4  // payload → TypingPayload
+        case ping           = 7  // payload → empty JSON object (keep-alive)
     }
 
     // MARK: Convenience
@@ -192,6 +342,77 @@ struct WireEnvelope: Codable, Sendable {
     }
 }
 
+/// Binary frame for one encrypted file chunk:
+/// [0x01][16 B transferId][4 B index BE][4 B total BE][AES-GCM combined box]
+enum FileChunkFrame {
+    static let magic: UInt8 = 0x01
+    static let headerLength = 1 + 16 + 4 + 4
+
+    static func encode(transferId: UUID, index: UInt32, total: UInt32, box: Data) -> Data {
+        var out = Data(capacity: headerLength + box.count)
+        out.append(magic)
+        var u = transferId.uuid
+        withUnsafeBytes(of: &u) { out.append(contentsOf: $0) }
+        var i = index.bigEndian
+        withUnsafeBytes(of: &i) { out.append(contentsOf: $0) }
+        var t = total.bigEndian
+        withUnsafeBytes(of: &t) { out.append(contentsOf: $0) }
+        out.append(box)
+        return out
+    }
+
+    static func decode(_ data: Data) -> (transferId: UUID, index: UInt32, total: UInt32, box: Data)? {
+        guard data.count > headerLength, data[data.startIndex] == magic else { return nil }
+        let bytes = [UInt8](data.prefix(headerLength))
+        let uuid = UUID(uuid: (bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+                               bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], bytes[16]))
+        let index = (UInt32(bytes[17]) << 24) | (UInt32(bytes[18]) << 16) | (UInt32(bytes[19]) << 8) | UInt32(bytes[20])
+        let total = (UInt32(bytes[21]) << 24) | (UInt32(bytes[22]) << 16) | (UInt32(bytes[23]) << 8) | UInt32(bytes[24])
+        let box = data.subdata(in: (data.startIndex + headerLength)..<data.endIndex)
+        return (uuid, index, total, box)
+    }
+
+    /// Additional authenticated data binding a chunk to its transfer and position.
+    static func aad(transferId: UUID, index: UInt32, total: UInt32) -> Data {
+        var d = Data()
+        var u = transferId.uuid
+        withUnsafeBytes(of: &u) { d.append(contentsOf: $0) }
+        var i = index.bigEndian
+        withUnsafeBytes(of: &i) { d.append(contentsOf: $0) }
+        var t = total.bigEndian
+        withUnsafeBytes(of: &t) { d.append(contentsOf: $0) }
+        return d
+    }
+}
+
+// MARK: - Encrypted inner payloads (v1.2 control messages)
+
+/// Control messages travel inside the Double Ratchet like chat messages.
+/// Plain `ChatMessage` JSON is still used for chat content so v1.1 peers can read texts.
+struct ControlMessage: Codable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        case sessionInit
+        case delete
+        case clear
+        case profile
+        case groupUpdate
+        case groupLeave
+        case groupInfoRequest
+    }
+    let kind: Kind
+    var ids: [UUID]? = nil
+    var groupId: String? = nil
+    var name: String? = nil
+    var avatar: Data? = nil
+    var group: GroupInfo? = nil
+    var version: Int? = nil
+}
+
+struct InnerEnvelope: Codable, Sendable {
+    let v: Int
+    let control: ControlMessage
+}
+
 // MARK: - Crypto Payload Types
 
 struct PreKeyBundlePayload: Codable, Equatable, Sendable {
@@ -202,6 +423,9 @@ struct PreKeyBundlePayload: Codable, Equatable, Sendable {
     let signedPreKeySignature: Data   // 64 B – Ed25519 signature over signedPreKey
     let oneTimePreKeyId: UInt32?
     let oneTimePreKey: Data?          // 32 B – Curve25519 DH public (optional)
+    // v1.2: whether the sender currently holds a ratchet session for the receiver.
+    var hasSession: Bool? = nil
+    var protocolVersion: Int? = nil
 }
 
 struct EncryptedMessagePayload: Codable, Equatable, Sendable {
@@ -225,10 +449,15 @@ struct PreKeyMessagePayload: Codable, Equatable, Sendable {
 struct AckPayload: Codable, Sendable {
     let messageId: UUID
     let status: ChatMessage.Status
+    var groupId: String? = nil
 }
 
 struct TypingPayload: Codable, Sendable {
     let isTyping: Bool
+}
+
+struct PingPayload: Codable, Sendable {
+    var t: Double = Date().timeIntervalSince1970
 }
 
 // MARK: - Error Types

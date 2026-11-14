@@ -4,6 +4,7 @@
 
 import SwiftUI
 import UIKit
+import PhotosUI
 
 struct SettingsView: View {
     @EnvironmentObject var chatManager: ChatManager
@@ -22,6 +23,7 @@ struct SettingsBody: View {
     @State private var editedName: String = ""
     @State private var showCopied = false
     @State private var showHowItWorks = false
+    @State private var avatarItem: PhotosPickerItem?
 
     var body: some View {
         NavigationStack {
@@ -56,7 +58,15 @@ struct SettingsBody: View {
     private var profileSection: some View {
         Section {
             HStack(spacing: 16) {
-                AvatarView(name: editedName, size: 64)
+                PhotosPicker(selection: $avatarItem, matching: .images) {
+                    ZStack(alignment: .bottomTrailing) {
+                        AvatarView(name: editedName, size: 64, imageData: chatManager.avatarData)
+                        Image(systemName: "camera.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(Color.white, TelegramColors.tint)
+                    }
+                }
+                .buttonStyle(.plain)
 
                 VStack(alignment: .leading, spacing: 4) {
                     TextField("Display Name", text: $editedName)
@@ -64,14 +74,29 @@ struct SettingsBody: View {
                         .textFieldStyle(.plain)
                         .onSubmit { applyNameChange() }
 
-                    Text("Visible to peers on your network")
+                    Text("Your name and photo are visible to everyone you chat with")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
             .padding(.vertical, 8)
+
+            if chatManager.avatarData != nil {
+                Button("Remove Photo", role: .destructive) {
+                    chatManager.updateAvatar(nil)
+                }
+            }
         } header: {
             Text("Profile")
+        }
+        .onChange(of: avatarItem) { item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    await MainActor.run { chatManager.updateAvatar(data) }
+                }
+                await MainActor.run { avatarItem = nil }
+            }
         }
     }
 
@@ -179,7 +204,7 @@ struct SettingsBody: View {
             HStack {
                 Text("Version")
                 Spacer()
-                Text("1.1.0")
+                Text("1.2.0")
                     .foregroundColor(.secondary)
             }
             HStack {
@@ -261,8 +286,8 @@ struct LocalNetworkForm: View {
                 Text("Status")
                 Spacer()
                 if network.isLocalNetworkDenied {
-                    Text("Local network permission denied")
-                        .foregroundColor(.red)
+                    Text("Bonjour blocked – using direct scan")
+                        .foregroundColor(.orange)
                         .multilineTextAlignment(.trailing)
                 } else {
                     Text(network.discoveryStatus)
@@ -319,6 +344,21 @@ struct LocalNetworkForm: View {
                 network.refreshLocalAddresses()
             }
 
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Auto-reconnect")
+                    Text(network.scanStatus.isEmpty ? "Remembered peers are re-dialed every 5 s; the local subnet is scanned periodically." : network.scanStatus)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if network.isScanning {
+                    ProgressView()
+                } else {
+                    Button("Scan Now") { network.scanNow() }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 Text("Connect by IP")
                     .font(.subheadline.weight(.semibold))
@@ -347,6 +387,11 @@ struct LocalNetworkForm: View {
                 .disabled(connectHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .buttonStyle(.borderedProminent)
 
+                if let ok = network.lastManualConnectSuccess, !ok.isEmpty {
+                    Text(ok)
+                        .font(.caption)
+                        .foregroundColor(.green)
+                }
                 if let err = network.lastManualConnectError, !err.isEmpty {
                     Text(err)
                         .font(.caption)
@@ -366,10 +411,7 @@ struct LocalNetworkForm: View {
     }
 
     private var networkFooter: String {
-        if network.isLocalNetworkDenied {
-            return "iOS blocked local-network / Bonjour access. TrollStore installs often never appear under Settings → Privacy → Local Network. This build is fake-signed with a multicast entitlement and a Local Network TCC grant; if discovery still fails, type the other device’s IP and port (default \(NetworkManager.defaultTCPPort)) below."
-        }
-        return "Automatic discovery uses Bonjour (_securechat._tcp). If the other device cannot be found — common with TrollStore or when a Mac is sharing Ethernet to an iPhone — type its IP and port (default \(NetworkManager.defaultTCPPort)) to connect directly."
+        "Peers are found automatically: Bonjour where allowed, remembered addresses (re-dialed every few seconds and whenever the app returns to the foreground), a UDP beacon, and a scan of your local /24 subnet on port \(NetworkManager.defaultTCPPort). TrollStore installs cannot use Bonjour, but the scan still works. You only need Connect by IP if the devices are on different subnets."
     }
 
     private func addressLine(_ item: NetworkManager.LocalAddress) -> String {

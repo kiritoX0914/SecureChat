@@ -153,18 +153,35 @@ final class CryptoEngine: ObservableObject {
         lock.lock()
         defer { lock.unlock() }
 
-        // Pick the first available one-time pre-key, if any
-        let otpk = oneTimePreKeys.values.first
-
+        // v1.2: bundles no longer advertise one-time pre-keys. With automatic
+        // reconnects and group chats several peers could race for the same
+        // OPK, and a consumed OPK makes the X3DH handshake fail permanently.
+        // The signed pre-key alone still gives an authenticated X3DH (3-DH).
+        // Incoming pre-key messages that reference an existing OPK are still
+        // accepted for compatibility with v1.1 peers.
         return PreKeyBundlePayload(
             identityDHKey: identityKeyPair.dhPublicKeyData,
             identitySigningKey: identityKeyPair.signingPublicKeyData,
             signedPreKeyId: signedPreKey.id,
             signedPreKey: signedPreKey.publicKeyData,
             signedPreKeySignature: signedPreKey.signature,
-            oneTimePreKeyId: otpk?.id,
-            oneTimePreKey: otpk?.publicKeyData
+            oneTimePreKeyId: nil,
+            oneTimePreKey: nil
         )
+    }
+
+    // MARK: - Session reset
+
+    /// Forget any ratchet state for a peer (used when sessions get out of sync).
+    func resetSession(for peerId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions.removeValue(forKey: peerId)
+        preKeySessions.remove(peerId)
+        ephemeralKeys.removeValue(forKey: peerId)
+        usedSignedPreKeyIds.removeValue(forKey: peerId)
+        usedOneTimePreKeyIds.removeValue(forKey: peerId)
+        saveSessions()
     }
 
     // MARK: - Session establishment (initiator)

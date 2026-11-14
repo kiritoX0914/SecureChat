@@ -13,6 +13,12 @@
         <string>_securechat._tcp</string>
     </array>
 
+    <!-- Saving received photos / videos from the share sheet -->
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>SecureChat saves photos and videos you choose to keep to your library.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>SecureChat lets you pick photos and videos to send.</string>
+
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
 
@@ -26,10 +32,10 @@
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>3</string>
 
     <key>CFBundleShortVersionString</key>
-    <string>1.1</string>
+    <string>1.2</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>

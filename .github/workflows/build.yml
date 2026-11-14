@@ -83,16 +83,16 @@ jobs:
           grep -q "com.apple.security.network.server" build/embedded-entitlements.xml
 
           cd build
-          zip -qr "SecureChat-lanfix.ipa" Payload
-          shasum -a 256 "SecureChat-lanfix.ipa" | tee SHA256SUMS
-          ls -lh "SecureChat-lanfix.ipa"
+          zip -qr "SecureChat-v1.2.ipa" Payload
+          shasum -a 256 "SecureChat-v1.2.ipa" | tee SHA256SUMS
+          ls -lh "SecureChat-v1.2.ipa"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SecureChat-lanfix-ipa
+          name: SecureChat-v1.2-ipa
           path: |
-            build/SecureChat-lanfix.ipa
+            build/SecureChat-v1.2.ipa
             build/SHA256SUMS
             build/embedded-entitlements.xml
           retention-days: 14
