@@ -60,6 +60,13 @@ struct ConversationView: View {
 
             if isSelecting {
                 selectionBar
+            } else if let g = conversation?.group, !g.members.contains(chatManager.localDeviceId) {
+                Text("You are no longer a member of this group.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color(.systemBackground))
             } else {
                 inputBar
             }

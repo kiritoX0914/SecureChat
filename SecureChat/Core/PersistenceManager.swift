@@ -91,12 +91,8 @@ final class PersistenceManager: @unchecked Sendable {
             conversation.unreadCount = s.unreadCount ?? 0
             // Persisted peers start offline; they go online once re-connected
             conversation.peer.isOnline = false
-            // Transfers that were interrupted by quitting are marked failed.
-            conversation.messages = conversation.messages.map { msg in
-                var m = msg
-                if m.status == .sending { m.status = .failed }
-                return m
-            }
+            // Unacknowledged outgoing messages keep their pendingRecipients and
+            // are re-sent automatically when the peer reconnects.
             result[s.peerId] = conversation
         }
         return result

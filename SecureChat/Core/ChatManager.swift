@@ -755,6 +755,10 @@ final class ChatManager: ObservableObject {
 
     private func deliver(_ original: ChatMessage, in convId: String) {
         guard var conv = conversations[convId] else { return }
+        if let g = conv.group, !g.members.contains(localDeviceId) {
+            lastError = "You are no longer a member of this group."
+            return
+        }
         var message = original
         message.senderName = displayName
         if conv.isGroup { message.groupId = convId }
@@ -768,7 +772,6 @@ final class ChatManager: ObservableObject {
         for peer in targets {
             transmit(message.id, convId: convId, to: peer)
         }
-        refreshStatusAfterAttempt(message.id, convId: convId)
     }
 
     private func canSend(to peerId: String) -> Bool {
@@ -783,7 +786,7 @@ final class ChatManager: ObservableObject {
         let key = "\(messageId.uuidString)|\(peerId)"
         guard !inFlight.contains(key) else { return }
         guard canSend(to: peerId) else {
-            refreshStatusAfterAttempt(messageId, convId: convId)
+            // Peer offline: stays queued (clock icon) and is re-sent on reconnect.
             return
         }
         guard let message = conversations[convId]?.messages.first(where: { $0.id == messageId }) else { return }
@@ -824,8 +827,7 @@ final class ChatManager: ObservableObject {
             guard let self else { return }
             if chunked == nil {
                 self.inFlight.remove(key)
-                if ok { self.markSent(messageId, convId: convId) }
-                self.refreshStatusAfterAttempt(messageId, convId: convId)
+                if ok { self.markSent(messageId, convId: convId) } else { self.refreshStatusAfterAttempt(messageId, convId: convId) }
             }
         }
         guard sent else {
@@ -841,8 +843,7 @@ final class ChatManager: ObservableObject {
                 guard let self else { return }
                 self.inFlight.remove(key)
                 self.transferProgress.removeValue(forKey: messageId)
-                if ok { self.markSent(messageId, convId: convId) }
-                self.refreshStatusAfterAttempt(messageId, convId: convId)
+                if ok { self.markSent(messageId, convId: convId) } else { self.refreshStatusAfterAttempt(messageId, convId: convId) }
             }
         }
     }

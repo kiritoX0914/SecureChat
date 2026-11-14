@@ -56,11 +56,13 @@ struct SettingsBody: View {
     // MARK: - Profile
 
     private var profileSection: some View {
-        Section {
+        let avatar = chatManager.avatarData
+        let nameForAvatar = editedName
+        return Section {
             HStack(spacing: 16) {
                 PhotosPicker(selection: $avatarItem, matching: .images) {
                     ZStack(alignment: .bottomTrailing) {
-                        AvatarView(name: editedName, size: 64, imageData: chatManager.avatarData)
+                        AvatarView(name: nameForAvatar, size: 64, imageData: avatar)
                         Image(systemName: "camera.circle.fill")
                             .font(.system(size: 20))
                             .foregroundStyle(Color.white, TelegramColors.tint)

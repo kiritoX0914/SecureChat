@@ -1,0 +1,14 @@
+name: Protocol test (headless, multi-process)
+
+on:
+  push:
+    branches: [ lan-fix ]
+  workflow_dispatch:
+
+jobs:
+  protocol:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run multi-process protocol test
+        run: ./ProtocolTests/run.sh

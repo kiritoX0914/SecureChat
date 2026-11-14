@@ -100,6 +100,8 @@ final class NetworkManager: ObservableObject {
         var activatedAt: Date?
         var lastReceived = Date()
         var closed = false
+        /// Peer sends heartbeats (v1.2+); only such links are dropped when silent.
+        var sendsPings = false
 
         init(connection: NWConnection, outgoing: Bool, isProbe: Bool, isManual: Bool, host: String?) {
             self.connection = connection
@@ -553,6 +555,10 @@ final class NetworkManager: ObservableObject {
 
     private func handleFrame(_ data: Data, on link: Link) {
         link.lastReceived = Date()
+        if !link.sendsPings, data.count < 512, data.first == UInt8(ascii: "{"),
+           let text = String(data: data, encoding: .utf8), text.contains("\"type\":7") {
+            link.sendsPings = true
+        }
 
         if let peerId = link.peerId {
             DispatchQueue.main.async {
@@ -607,7 +613,7 @@ final class NetworkManager: ObservableObject {
         // 1. Heartbeat + dead link detection.
         let ping = currentPingFrame()
         for link in Array(links.values) where !link.closed && link.peerId != nil {
-            if now.timeIntervalSince(link.lastReceived) > Self.deadLinkTimeout {
+            if link.sendsPings && now.timeIntervalSince(link.lastReceived) > Self.deadLinkTimeout {
                 print("[NetworkManager] Link to \(link.peerId ?? "?") silent for \(Int(now.timeIntervalSince(link.lastReceived)))s – dropping")
                 close(link)
                 continue
