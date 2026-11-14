@@ -65,6 +65,8 @@ final class LANDiscovery {
     // MARK: - Private State
 
     private var listener: NWListener?
+    /// Turned off after a Bonjour name conflict so the TCP listener stays up.
+    private var bonjourAdvertisingEnabled = true
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "com.securechat.discovery")
 
@@ -198,17 +200,26 @@ final class LANDiscovery {
             return
         }
 
-        // Build Bonjour service descriptor with a TXT record.
-        let txtRecord = buildTXTRecord(deviceId: deviceId, displayName: displayName)
-        listener?.service = NWListener.Service(
-            type: Self.serviceType,
-            txtRecord: txtRecord
-        )
+        // Build Bonjour service descriptor with a TXT record. The service name
+        // is derived from our device id so two devices with the same host name
+        // (e.g. two phones both called "iPhone") don't collide. If Bonjour still
+        // reports a name conflict we keep the plain TCP listener without it.
+        if bonjourAdvertisingEnabled {
+            let txtRecord = buildTXTRecord(deviceId: deviceId, displayName: displayName)
+            listener?.service = NWListener.Service(
+                name: Self.serviceName(for: deviceId),
+                type: Self.serviceType,
+                txtRecord: txtRecord
+            )
+        }
 
         setListenerPhase(.starting)
 
-        listener?.stateUpdateHandler = { [weak self] state in
+        let thisListener = listener
+        listener?.stateUpdateHandler = { [weak self, weak thisListener] state in
             guard let self else { return }
+            // Ignore late events from a listener we've already replaced.
+            guard let thisListener, thisListener === self.listener else { return }
             switch state {
             case .ready:
                 let port = self.listener?.port?.rawValue
@@ -230,6 +241,16 @@ final class LANDiscovery {
             case .failed(let error):
                 print("[LANDiscovery] Listener failed: \(error). Restarting…")
                 self.listener?.cancel()
+                if Self.isNameConflict(error) && self.bonjourAdvertisingEnabled {
+                    print("[LANDiscovery] Bonjour name conflict – continuing without Bonjour advertising")
+                    self.bonjourAdvertisingEnabled = false
+                    self.queue.async { [weak self] in
+                        guard let self, let id = self.advertisedDeviceId,
+                              let name = self.advertisedDisplayName else { return }
+                        self.startAdvertising(deviceId: id, displayName: name, preferFixedPort: self.preferFixedPort)
+                    }
+                    return
+                }
                 if preferFixedPort && Self.isAddressInUse(error) {
                     self.queue.async { [weak self] in
                         guard let self, let id = self.advertisedDeviceId,
@@ -276,11 +297,18 @@ final class LANDiscovery {
     func updateDisplayName(_ name: String) {
         guard let deviceId = advertisedDeviceId else { return }
         advertisedDisplayName = name
+        guard bonjourAdvertisingEnabled else { return }
         let txtRecord = buildTXTRecord(deviceId: deviceId, displayName: name)
         listener?.service = NWListener.Service(
+            name: Self.serviceName(for: deviceId),
             type: Self.serviceType,
             txtRecord: txtRecord
         )
+    }
+
+    /// Unique-per-device Bonjour instance name.
+    static func serviceName(for deviceId: String) -> String {
+        "SecureChat-" + String(deviceId.replacingOccurrences(of: "-", with: "").prefix(12))
     }
 
     // MARK: - Browsing
@@ -298,8 +326,10 @@ final class LANDiscovery {
 
         setBrowserPhase(.starting)
 
-        browser?.stateUpdateHandler = { [weak self] state in
+        let thisBrowser = browser
+        browser?.stateUpdateHandler = { [weak self, weak thisBrowser] state in
             guard let self else { return }
+            guard let thisBrowser, thisBrowser === self.browser else { return }
             switch state {
             case .ready:
                 print("[LANDiscovery] Browser ready")
@@ -414,6 +444,12 @@ final class LANDiscovery {
             || text.contains("-65570")
             || text.contains("NoAuth")
             || text.contains("-65555")
+    }
+
+    static func isNameConflict(_ error: NWError) -> Bool {
+        if case .dns(let code) = error, code == -65548 { return true }
+        let text = String(describing: error)
+        return text.contains("NameConflict") || text.contains("-65548")
     }
 
     static func isAddressInUse(_ error: NWError) -> Bool {
