@@ -12,3 +12,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run multi-process protocol test
         run: ./ProtocolTests/run.sh
+      - name: Crypto interop vectors (Swift app crypto <-> Python reference from PROTOCOL.md)
+        run: ./ProtocolTests/vectors/run.sh "$RUNNER_TEMP/vectors"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: protocol-vectors
+          path: |
+            ${{ runner.temp }}/vectors/PROTOCOL-vectors.json
+            ${{ runner.temp }}/vectors/python-replies.json
