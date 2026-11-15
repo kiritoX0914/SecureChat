@@ -91,7 +91,7 @@ def main(vec_path, out_path):
             assert env["type"] == 2; m = p
         pt = r.decrypt(m)
         assert pt.decode() == v["aToBPlaintexts"][i], (i, pt)
-        print(f"python decrypted swift frame {i} (type {env['type']}): {pt[:70].decode()}")
+        print(f"python decrypted swift frame {i} (type {env['type']}): {pt[:70].decode(errors="replace")}")
     f = v["file"]; key = b64d(f["key"]); tid = uuid.UUID(f["transferId"]); data = bytearray(f["size"])
     for c in f["chunkFrames"]:
         c = b64d(c); assert c[0] == 1 and uuid.UUID(bytes=c[1:17]) == tid
