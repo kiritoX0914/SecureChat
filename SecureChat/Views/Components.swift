@@ -295,12 +295,12 @@ struct ReplyQuoteView: View {
                 .frame(maxHeight: .infinity)
             VStack(alignment: .leading, spacing: 1) {
                 Text(sender.isEmpty ? "Reply" : sender)
-                    .font(.caption.weight(.semibold))
+                    .font(.caption.weight(isOutgoing ? .bold : .semibold))
                     .foregroundColor(isOutgoing ? .white : TelegramColors.tint)
                     .lineLimit(1)
                 Text(text.isEmpty ? " " : text)
                     .font(.caption)
-                    .foregroundColor(isOutgoing ? .white.opacity(0.85) : .secondary)
+                    .foregroundColor(isOutgoing ? .white.opacity(0.9) : .secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -311,7 +311,10 @@ struct ReplyQuoteView: View {
         .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isOutgoing ? Color.white.opacity(0.15) : TelegramColors.tint.opacity(0.10))
+                // Outgoing: a *darker* inset on the blue bubble. A white tint lightens
+                // the blue behind white text (contrast ~3:1, unreadable); black 22%
+                // deepens it (white text ~6:1) and still reads as a distinct block.
+                .fill(isOutgoing ? Color.black.opacity(0.22) : TelegramColors.tint.opacity(0.10))
         )
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }

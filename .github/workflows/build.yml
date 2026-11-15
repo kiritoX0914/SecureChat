@@ -102,6 +102,26 @@ jobs:
             echo "OK $key"
           done
 
+          # App icon: SpringBoard / the app switcher / TrollStore read the loose
+          # CFBundleIconFiles PNGs, so every iPhone + iPad size must be present
+          # and referenced (not just the 1024 inside Assets.car).
+          echo "===== CFBundleIcons ====="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad" "$PLIST"
+          ls -l "$APP"/AppIcon*.png
+          for f in AppIcon20x20@2x AppIcon20x20@3x AppIcon29x29@2x AppIcon29x29@3x \
+                   AppIcon40x40@2x AppIcon40x40@3x AppIcon60x60@2x AppIcon60x60@3x \
+                   AppIcon76x76@2x~ipad AppIcon83.5x83.5@2x~ipad; do
+            test -s "$APP/$f.png" || { echo "MISSING $f.png"; exit 1; }
+            echo "OK $f.png"
+          done
+          for n in AppIcon20x20 AppIcon29x29 AppIcon40x40 AppIcon60x60; do
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$PLIST" | grep -q "$n" || { echo "plist missing $n"; exit 1; }
+          done
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$PLIST")" = AppIcon
+          # No stray icon files from other/old sets anywhere in the bundle.
+          find "$APP" -iname '*icon*' -o -iname '*lock*' | sort
+
           # Xcode was built with CODE_SIGNING_ALLOWED=NO, so entitlements are not
           # embedded. Fake-sign with ldid so TrollStore preserves them.
           ldid -S"$ENTITLEMENTS" "$BIN"
@@ -114,16 +134,16 @@ jobs:
           grep -q "com.apple.security.network.server" build/embedded-entitlements.xml
 
           cd build
-          zip -qr "SecureChat-v1.4.ipa" Payload
-          shasum -a 256 "SecureChat-v1.4.ipa" | tee SHA256SUMS
-          ls -lh "SecureChat-v1.4.ipa"
+          zip -qr "SecureChat-v1.5.ipa" Payload
+          shasum -a 256 "SecureChat-v1.5.ipa" | tee SHA256SUMS
+          ls -lh "SecureChat-v1.5.ipa"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SecureChat-v1.4-ipa
+          name: SecureChat-v1.5-ipa
           path: |
-            build/SecureChat-v1.4.ipa
+            build/SecureChat-v1.5.ipa
             build/SHA256SUMS
             build/embedded-entitlements.xml
             build/ios18-sim.png
