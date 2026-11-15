@@ -105,6 +105,20 @@ jobs:
           # App icon: SpringBoard / the app switcher / TrollStore read the loose
           # CFBundleIconFiles PNGs, so every iPhone + iPad size must be present
           # and referenced (not just the 1024 inside Assets.car).
+          # actool (iOS 16 target) only emits 60x60@2x + 76x76@2x~ipad as loose
+          # files; ship every size loose (TrollStore/SpringBoard/app switcher read
+          # these) and list them all in CFBundleIconFiles for iPhone and iPad.
+          for f in packaging/icons/*.png; do cp -n "$f" "$APP/"; done
+          PB=/usr/libexec/PlistBuddy
+          $PB -c "Delete :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$PLIST"
+          $PB -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$PLIST"
+          i=0; for n in SecureChatIcon20x20 SecureChatIcon29x29 SecureChatIcon40x40 SecureChatIcon60x60; do
+            $PB -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:$i string $n" "$PLIST"; i=$((i+1)); done
+          $PB -c "Delete :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" "$PLIST"
+          $PB -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles array" "$PLIST"
+          i=0; for n in SecureChatIcon20x20 SecureChatIcon29x29 SecureChatIcon40x40 SecureChatIcon60x60 SecureChatIcon76x76 SecureChatIcon83.5x83.5; do
+            $PB -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles:$i string $n" "$PLIST"; i=$((i+1)); done
+
           echo "===== CFBundleIcons ====="
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad" "$PLIST"
