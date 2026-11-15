@@ -16,7 +16,9 @@ struct ConversationView: View {
 
     @State private var messageText = ""
     @State private var typingTask: Task<Void, Never>?
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused = false
+    /// Pasted images / files waiting to be sent (shown above the composer).
+    @State private var staged: [StagedAttachment] = []
 
     // Reply
     @State private var replyingTo: ChatMessage?
@@ -109,6 +111,9 @@ struct ConversationView: View {
         }
         .onAppear {
             chatManager.markAsRead(peerId: peerId)
+            #if targetEnvironment(macCatalyst)
+            isInputFocused = true
+            #endif
         }
         .onChange(of: conversation?.messages.count) { _ in
             chatManager.markAsRead(peerId: peerId)
@@ -278,7 +283,11 @@ struct ConversationView: View {
                     proxy.scrollTo(lastId, anchor: .bottom)
                 }
             }
-            .simultaneousGesture(TapGesture().onEnded { isInputFocused = false })
+            .simultaneousGesture(TapGesture().onEnded {
+                #if !targetEnvironment(macCatalyst)
+                isInputFocused = false
+                #endif
+            })
         }
     }
 
@@ -308,7 +317,11 @@ struct ConversationView: View {
                     if isSelecting { toggleSelection(msg.id) } else { open(msg) }
                 },
                 onRetry: { chatManager.resend(message.id, in: peerId) },
-                menu: isSelecting ? nil : { AnyView(contextMenu(for: message, isOutgoing: isOutgoing)) }
+                menu: isSelecting ? nil : { AnyView(contextMenu(for: message, isOutgoing: isOutgoing)) },
+                onSwipeReply: isSelecting || !canCompose ? nil : {
+                    replyingTo = message
+                    isInputFocused = true
+                }
             )
             .allowsHitTesting(!isSelecting)
         }
@@ -447,6 +460,12 @@ struct ConversationView: View {
                 }
             }
 
+            if !staged.isEmpty {
+                StagedAttachmentsBar(items: staged) { id in
+                    staged.removeAll { $0.id == id }
+                }
+            }
+
             HStack(alignment: .bottom, spacing: 6) {
                 Menu {
                     Button {
@@ -466,7 +485,7 @@ struct ConversationView: View {
 
                 composer
 
-                if !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if hasSomethingToSend {
                     Button(action: sendTextMessage) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 32))
@@ -479,48 +498,71 @@ struct ConversationView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(Color(.systemBackground))
-            .animation(.easeInOut(duration: 0.15), value: messageText.isEmpty)
+            .animation(.easeInOut(duration: 0.15), value: hasSomethingToSend)
         }
     }
 
-    @ViewBuilder
-    private var composer: some View {
+    private var hasSomethingToSend: Bool {
+        !staged.isEmpty || !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canCompose: Bool {
+        if let g = conversation?.group { return g.members.contains(chatManager.localDeviceId) }
+        return true
+    }
+
+    private var composerPlaceholder: String {
         #if targetEnvironment(macCatalyst)
-        MacComposerView(text: $messageText, onSubmit: sendTextMessage)
+        return "Message  (Enter to send, Shift+Enter for new line, ⌘V to paste images)"
+        #else
+        return "Message"
+        #endif
+    }
+
+    private var composer: some View {
+        ComposerView(text: $messageText, isFocused: $isInputFocused,
+                     placeholder: composerPlaceholder,
+                     onSubmit: sendTextMessage,
+                     onPasteAttachments: handlePaste)
             .background(Color(.systemGray6))
             .clipShape(RoundedRectangle(cornerRadius: 18))
-            .overlay(alignment: .leading) {
-                if messageText.isEmpty {
-                    Text("Message  (Enter to send, Shift+Enter for new line)")
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 12)
-                        .allowsHitTesting(false)
-                }
-            }
             .onChange(of: messageText) { newValue in
                 handleTypingChange(newValue)
             }
-        #else
-        TextField("Message", text: $messageText, axis: .vertical)
-            .lineLimit(1...6)
-            .textFieldStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .focused($isInputFocused)
-            .onChange(of: messageText) { newValue in
-                handleTypingChange(newValue)
+    }
+
+    private func handlePaste(_ providers: [NSItemProvider]) {
+        let fallback = UIPasteboard.general.hasImages ? (UIPasteboard.general.images ?? []) : []
+        PasteLoader.load(providers, fallbackImages: fallback) { items in
+            if items.isEmpty {
+                chatManager.lastError = "Nothing to paste"
+            } else {
+                staged.append(contentsOf: items)
+                isInputFocused = true
             }
-        #endif
+        }
     }
 
     // MARK: - Actions
 
     private func sendTextMessage() {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        chatManager.sendMessage(text, to: peerId, replyTo: replyingTo)
+        guard !text.isEmpty || !staged.isEmpty else { return }
+        var reply = replyingTo
+        for item in staged {
+            switch item.kind {
+            case .image(let data):
+                let name = "IMG_\(DateFormatter.fileTimestamp.string(from: Date())).jpg"
+                chatManager.sendImage(data, filename: name, to: peerId, replyTo: reply)
+            case .file(let url, let mime):
+                chatManager.sendFile(at: url, filename: item.name, mimeType: mime, to: peerId, replyTo: reply)
+            }
+            reply = nil   // only the first item carries the reply
+        }
+        staged.removeAll()
+        if !text.isEmpty {
+            chatManager.sendMessage(text, to: peerId, replyTo: reply)
+        }
         messageText = ""
         replyingTo = nil
         sendTypingStop()

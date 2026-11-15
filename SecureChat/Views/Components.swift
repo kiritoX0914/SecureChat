@@ -175,6 +175,8 @@ struct MessageBubbleView: View {
     var onRetry: (() -> Void)? = nil
     /// Context menu attached to the bubble itself (not the whole row).
     var menu: (() -> AnyView)? = nil
+    /// Swipe left on the bubble to reply.
+    var onSwipeReply: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -182,13 +184,16 @@ struct MessageBubbleView: View {
 
     var body: some View {
         BubbleRowLayout(isOutgoing: isOutgoing) {
-            if let menu {
-                bubble
-                    .contentShape(.contextMenuPreview, BubbleShape(isOutgoing: isOutgoing))
-                    .contextMenu { menu() }
-            } else {
-                bubble
+            Group {
+                if let menu {
+                    bubble
+                        .contentShape(.contextMenuPreview, BubbleShape(isOutgoing: isOutgoing))
+                        .contextMenu { menu() }
+                } else {
+                    bubble
+                }
             }
+            .swipeToReply(enabled: onSwipeReply != nil) { onSwipeReply?() }
         }
     }
 
@@ -956,13 +961,41 @@ struct PickedMovie: Transferable {
     }
 }
 
-// MARK: - Mac composer (Enter = send, Shift+Enter = newline)
+// MARK: - Composer (both platforms)
+// Mac: Enter = send, Shift/Option+Enter = newline.
+// Both: pasting an image (screenshot, copied photo) or a copied file attaches it
+// instead of inserting text.
 
-#if targetEnvironment(macCatalyst)
 final class ComposerTextView: UITextView {
     var onSubmit: (() -> Void)?
+    /// Called with the pasteboard's item providers when it holds images / files.
+    var onPasteAttachments: (([NSItemProvider]) -> Void)?
     private(set) var lastModifiers: UIKeyModifierFlags = []
 
+    static func pasteboardHasAttachments(_ pb: UIPasteboard = .general) -> Bool {
+        if pb.hasImages { return true }
+        if pb.hasURLs, let urls = pb.urls, urls.contains(where: { $0.isFileURL }) { return true }
+        let attachmentTypes = [UTType.image.identifier, UTType.fileURL.identifier, UTType.movie.identifier]
+        return pb.contains(pasteboardTypes: attachmentTypes)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pb = UIPasteboard.general
+        if let handler = onPasteAttachments, Self.pasteboardHasAttachments(pb) {
+            handler(pb.itemProviders)
+            return
+        }
+        super.paste(sender)
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), onPasteAttachments != nil, Self.pasteboardHasAttachments() {
+            return true
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    #if targetEnvironment(macCatalyst)
     private func isReturn(_ presses: Set<UIPress>) -> UIKey? {
         guard let key = presses.first?.key else { return nil }
         if key.keyCode == .keyboardReturnOrEnter || key.keyCode == .keypadEnter { return key }
@@ -987,11 +1020,15 @@ final class ComposerTextView: UITextView {
         if markedTextRange == nil, isReturn(presses) != nil { return }
         super.pressesEnded(presses, with: event)
     }
+    #endif
 }
 
-struct MacComposerView: UIViewRepresentable {
+struct ComposerView: UIViewRepresentable {
     @Binding var text: String
+    @Binding var isFocused: Bool
+    var placeholder: String = "Message"
     var onSubmit: () -> Void
+    var onPasteAttachments: ([NSItemProvider]) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -999,11 +1036,27 @@ struct MacComposerView: UIViewRepresentable {
         let tv = ComposerTextView()
         tv.delegate = context.coordinator
         tv.font = UIFont.preferredFont(forTextStyle: .body)
+        tv.adjustsFontForContentSizeCategory = true
         tv.backgroundColor = .clear
         tv.isScrollEnabled = true
         tv.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        tv.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         tv.onSubmit = onSubmit
+        tv.onPasteAttachments = onPasteAttachments
         tv.text = text
+
+        let label = UILabel()
+        label.text = placeholder
+        label.font = tv.font
+        label.textColor = .placeholderText
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.tag = 4711
+        tv.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: tv.leadingAnchor, constant: 11),
+            label.topAnchor.constraint(equalTo: tv.topAnchor, constant: 8),
+        ])
+        label.isHidden = !text.isEmpty
         return tv
     }
 
@@ -1011,6 +1064,13 @@ struct MacComposerView: UIViewRepresentable {
         context.coordinator.parent = self
         if tv.text != text { tv.text = text }
         tv.onSubmit = onSubmit
+        tv.onPasteAttachments = onPasteAttachments
+        (tv.viewWithTag(4711) as? UILabel)?.isHidden = !text.isEmpty
+        if isFocused && !tv.isFirstResponder {
+            DispatchQueue.main.async { tv.becomeFirstResponder() }
+        } else if !isFocused && tv.isFirstResponder {
+            DispatchQueue.main.async { tv.resignFirstResponder() }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerTextView, context: Context) -> CGSize? {
@@ -1023,13 +1083,24 @@ struct MacComposerView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: MacComposerView
-        init(_ parent: MacComposerView) { self.parent = parent }
+        var parent: ComposerView
+        init(_ parent: ComposerView) { self.parent = parent }
 
         func textViewDidChange(_ textView: UITextView) {
             parent.text = textView.text
+            (textView.viewWithTag(4711) as? UILabel)?.isHidden = !textView.text.isEmpty
+            textView.invalidateIntrinsicContentSize()
         }
 
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            if !parent.isFocused { DispatchQueue.main.async { self.parent.isFocused = true } }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            if parent.isFocused { DispatchQueue.main.async { self.parent.isFocused = false } }
+        }
+
+        #if targetEnvironment(macCatalyst)
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             // Fallback if the Return key arrives as text input instead of a key press.
             guard text == "\n", textView.markedTextRange == nil,
@@ -1038,9 +1109,191 @@ struct MacComposerView: UIViewRepresentable {
             parent.onSubmit()
             return false
         }
+        #endif
     }
 }
-#endif
+
+// MARK: - Staged attachments (pasted, shown before sending)
+
+struct StagedAttachment: Identifiable {
+    enum Kind {
+        case image(Data)
+        case file(URL, mimeType: String)
+    }
+    let id = UUID()
+    let kind: Kind
+    let preview: UIImage?
+    let name: String
+}
+
+enum PasteLoader {
+    /// Turn pasteboard item providers into staged attachments (images or files).
+    static func load(_ providers: [NSItemProvider], fallbackImages: [UIImage],
+                     completion: @escaping ([StagedAttachment]) -> Void) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var results: [(Int, StagedAttachment)] = []
+        func add(_ i: Int, _ a: StagedAttachment) { lock.lock(); results.append((i, a)); lock.unlock() }
+
+        for (i, provider) in providers.enumerated() {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    defer { group.leave() }
+                    guard let url, url.isFileURL else { return }
+                    let type = UTType(filenameExtension: url.pathExtension)
+                    if type?.conforms(to: .image) == true,
+                       let data = try? Data(contentsOf: url), let img = UIImage(data: data) {
+                        add(i, StagedAttachment(kind: .image(data), preview: img, name: url.lastPathComponent))
+                    } else {
+                        let tmp = FileManager.default.temporaryDirectory
+                            .appendingPathComponent(String(UUID().uuidString.prefix(8)) + "-" + url.lastPathComponent)
+                        let ok = (try? FileManager.default.copyItem(at: url, to: tmp)) != nil
+                        guard ok else { return }
+                        let mime = type?.preferredMIMEType ?? "application/octet-stream"
+                        add(i, StagedAttachment(kind: .file(tmp, mimeType: mime), preview: nil, name: url.lastPathComponent))
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                group.enter()
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    defer { group.leave() }
+                    guard let data, let img = UIImage(data: data) else { return }
+                    add(i, StagedAttachment(kind: .image(data), preview: img, name: "Pasted image"))
+                }
+            }
+        }
+        group.notify(queue: .main) {
+            var out = results.sorted { $0.0 < $1.0 }.map(\.1)
+            if out.isEmpty {
+                for img in fallbackImages {
+                    if let d = img.pngData() {
+                        out.append(StagedAttachment(kind: .image(d), preview: img, name: "Pasted image"))
+                    }
+                }
+            }
+            completion(out)
+        }
+    }
+}
+
+struct StagedAttachmentsBar: View {
+    let items: [StagedAttachment]
+    let onRemove: (UUID) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(items) { item in
+                    ZStack(alignment: .topTrailing) {
+                        Group {
+                            if let img = item.preview {
+                                Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "doc.fill").font(.title2).foregroundColor(TelegramColors.tint)
+                                    Text(item.name).font(.caption2).lineLimit(2).multilineTextAlignment(.center)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(4)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color(.secondarySystemBackground))
+                            }
+                        }
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                        Button { onRemove(item.id) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(Color.white, Color.black.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 6, y: -6)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
+        }
+        .frame(height: 80)
+        .background(Color(.systemBackground))
+    }
+}
+
+// MARK: - Swipe left to reply (Telegram style)
+
+struct SwipeToReplyModifier: ViewModifier {
+    var enabled: Bool
+    let onReply: () -> Void
+
+    @State private var offset: CGFloat = 0
+    @State private var axisLocked: Bool? = nil   // true = horizontal, false = vertical
+    @State private var armed = false
+
+    private let threshold: CGFloat = 56
+    private let maxPull: CGFloat = 88
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .trailing) {
+                let progress = min(1, -offset / threshold)
+                Image(systemName: "arrowshape.turn.up.left.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundColor(TelegramColors.tint)
+                    .scaleEffect(armed ? 1.12 : 0.6 + 0.4 * progress)
+                    .opacity(Double(progress))
+                    .offset(x: 40)
+                    .allowsHitTesting(false)
+            }
+            .offset(x: offset)
+            .simultaneousGesture(drag, including: enabled ? .all : .subviews)
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 22, coordinateSpace: .local)
+            .onChanged { value in
+                let dx = value.translation.width, dy = value.translation.height
+                if axisLocked == nil {
+                    axisLocked = abs(dx) > abs(dy) * 1.6 && dx < 0
+                }
+                guard axisLocked == true else { return }
+                let pull = max(0, -dx)
+                // Rubber-band past the max.
+                let eased = pull <= maxPull ? pull : maxPull + (pull - maxPull) * 0.15
+                offset = -eased
+                let nowArmed = pull >= threshold
+                if nowArmed != armed {
+                    armed = nowArmed
+                    if nowArmed { Haptics.impact() }
+                }
+            }
+            .onEnded { _ in
+                if axisLocked == true && armed { onReply() }
+                axisLocked = nil
+                armed = false
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { offset = 0 }
+            }
+    }
+}
+
+enum Haptics {
+    static func impact() {
+        #if !targetEnvironment(macCatalyst)
+        let g = UIImpactFeedbackGenerator(style: .medium)
+        g.prepare()
+        g.impactOccurred()
+        #endif
+    }
+}
+
+extension View {
+    func swipeToReply(enabled: Bool = true, perform: @escaping () -> Void) -> some View {
+        modifier(SwipeToReplyModifier(enabled: enabled, onReply: perform))
+    }
+}
 
 // MARK: - Photo library picker (PHPicker; images and videos)
 

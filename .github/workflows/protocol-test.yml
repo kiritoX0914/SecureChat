@@ -12,6 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run multi-process protocol test
         run: ./ProtocolTests/run.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Crypto interop vectors (Swift app crypto <-> Python reference from PROTOCOL.md)
         run: ./ProtocolTests/vectors/run.sh "$RUNNER_TEMP/vectors"
       - uses: actions/upload-artifact@v4
