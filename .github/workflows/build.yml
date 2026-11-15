@@ -108,17 +108,19 @@ jobs:
           echo "===== CFBundleIcons ====="
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad" "$PLIST"
-          ls -l "$APP"/AppIcon*.png
-          for f in AppIcon20x20@2x AppIcon20x20@3x AppIcon29x29@2x AppIcon29x29@3x \
-                   AppIcon40x40@2x AppIcon40x40@3x AppIcon60x60@2x AppIcon60x60@3x \
-                   AppIcon76x76@2x~ipad AppIcon83.5x83.5@2x~ipad; do
+          ls -l "$APP"/*.png
+          # The old v1.0-1.4 names must be gone so no name-keyed icon cache can hit.
+          if ls "$APP"/AppIcon*.png >/dev/null 2>&1; then echo "stale AppIcon*.png present"; exit 1; fi
+          for f in SecureChatIcon20x20@2x SecureChatIcon20x20@3x SecureChatIcon29x29@2x SecureChatIcon29x29@3x \
+                   SecureChatIcon40x40@2x SecureChatIcon40x40@3x SecureChatIcon60x60@2x SecureChatIcon60x60@3x \
+                   SecureChatIcon76x76@2x~ipad SecureChatIcon83.5x83.5@2x~ipad; do
             test -s "$APP/$f.png" || { echo "MISSING $f.png"; exit 1; }
             echo "OK $f.png"
           done
-          for n in AppIcon20x20 AppIcon29x29 AppIcon40x40 AppIcon60x60; do
+          for n in SecureChatIcon20x20 SecureChatIcon29x29 SecureChatIcon40x40 SecureChatIcon60x60; do
             /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "$PLIST" | grep -q "$n" || { echo "plist missing $n"; exit 1; }
           done
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$PLIST")" = AppIcon
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$PLIST")" = SecureChatIcon
           # No stray icon files from other/old sets anywhere in the bundle.
           find "$APP" -iname '*icon*' -o -iname '*lock*' | sort
 
